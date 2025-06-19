@@ -219,6 +219,7 @@ const messageData = {
       updateRSSFeed(grouped[0]);
       io.emit('new_message', grouped[0]);
     }
+    updateMediaIndexFile();
   });
 
   client.initialize();
@@ -321,12 +322,15 @@ function updateMediaIndexFile() {
       timestamp: msg.timestamp,
       caption: msg.body || '',
       type: msg.type,
-      mediaPath: msg.mediaPath, // relative path like media/media_123.jpg
+      mediaPath: msg.mediaPath,
     }));
+
+  if (mediaItems.length === 0) return;
 
   fs.writeFileSync('./media/media.json', JSON.stringify(mediaItems, null, 2));
   console.log(`📦 media.json updated with ${mediaItems.length} items`);
 }
+
 
 
 app.post('/api/fetch-history', async (req, res) => {
