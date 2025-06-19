@@ -23,6 +23,7 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 app.use('/rss', express.static(path.join(__dirname, 'rss')));
+app.use('/media', express.static(path.join(__dirname, 'media')));
 
 // Global variables
 let client = null;

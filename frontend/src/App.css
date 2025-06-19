@@ -304,3 +304,23 @@
   border-bottom: none;
   font-weight: 600;
 }
+
+.media-preview-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.media-preview-content {
+  background: white;
+  padding: 20px;
+  max-width: 90%;
+  max-height: 90%;
+  overflow: auto;
+  border-radius: 10px;
+  box-shadow: 0 0 15px rgba(0,0,0,0.3);
+}
