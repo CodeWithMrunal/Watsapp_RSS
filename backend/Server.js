@@ -324,15 +324,43 @@ app.post('/api/fetch-history', async (req, res) => {
     const chat = await client.getChatById(selectedGroup.id);
     const messages = await chat.fetchMessages({ limit });
     
-    const processedMessages = messages.map(msg => ({
+    const processedMessages = await Promise.all(
+  messages.map(async (msg) => {
+    let mediaPath = null;
+
+    if (msg.hasMedia) {
+      try {
+        const media = await msg.downloadMedia();
+
+        if (media && media.data) {
+          const ext = media.mimetype.split('/')[1] || 'bin';
+          const filename = `media_${Date.now()}_${msg.id.id}.${ext}`;
+          mediaPath = path.join('media', filename); // relative for JSON
+          const fullPath = path.join(__dirname, mediaPath);
+
+          fs.writeFileSync(fullPath, media.data, { encoding: 'base64' });
+          console.log(`✅ [History] Saved media for message ${msg.id._serialized} to ${mediaPath}`);
+        } else {
+          console.warn(`⚠️ [History] Media empty or null for ${msg.id._serialized}`);
+        }
+      } catch (err) {
+        console.error(`❌ [History] Failed to download media for ${msg.id._serialized}:`, err.message);
+      }
+    }
+
+    return {
       id: msg.id._serialized,
       body: msg.body,
       author: msg.author,
       timestamp: msg.timestamp,
       type: msg.type,
       hasMedia: msg.hasMedia,
-      from: msg.from
-    }));
+      from: msg.from,
+      mediaPath, // Will be null if no media or failed
+    };
+  })
+);
+
     
     // Filter by user if specified
     const filteredMessages = selectedUser 
