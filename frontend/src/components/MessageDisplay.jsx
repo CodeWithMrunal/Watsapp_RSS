@@ -7,10 +7,14 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser 
   const [previewMedia, setPreviewMedia] = useState(null);
 
   const handleMediaClick = (msg) => {
+    console.log('Media clicked:', msg);
     if (msg.mediaPath) {
       setPreviewMedia({ ...msg, src: `http://localhost:3001/${msg.mediaPath.replace(/\\/g, '/')}` });
+    } else {
+      console.log("msg.mediapath is undefined");
     }
   };
+
 
   const closePreview = () => setPreviewMedia(null);
 
@@ -162,12 +166,34 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser 
                         {message.body ? (
                           <p className="mb-0">{message.body}</p>
                         ) : (
-                          <span
-                            className="text-primary clickable"
-                            onClick={() => handleMediaClick(message)}
-                          >
-                            [Click to view {message.type}]
-                          </span>
+                          <>
+
+                            <span
+                              className="text-primary clickable"
+                              onClick={() => handleMediaClick(message)}
+                            >
+                              [Click to view {message.type}]
+                            </span>
+                            {message.type === 'image' && message.mediaPath && (
+                              <img
+                                src={`http://localhost:3001/${message.mediaPath.replace(/\\/g, '/')}`}
+                                alt="media"
+                                className="thumbnail mt-1"
+                                onClick={() => handleMediaClick(message)}
+                                style={{ maxWidth: '120px', cursor: 'pointer', borderRadius: '4px' }}
+                              />
+                            )}
+                            {message.type === 'video' && message.mediaPath && (
+                              <video
+                                src={`http://localhost:3001/${message.mediaPath.replace(/\\/g, '/')}`}
+                                className="thumbnail mt-1"
+                                onClick={() => handleMediaClick(message)}
+                                style={{ maxWidth: '120px', cursor: 'pointer', borderRadius: '4px' }}
+                                muted
+                              />
+                            )}
+
+                          </>
 
                         )}
                       </div>
@@ -229,6 +255,16 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser 
                           style={{ maxWidth: '120px', cursor: 'pointer', borderRadius: '4px' }}
                         />
                       )}
+                      {message.type === 'video' && message.mediaPath && (
+                        <video
+                          src={`http://localhost:3001/${message.mediaPath.replace(/\\/g, '/')}`}
+                          className="thumbnail mt-1"
+                          onClick={() => handleMediaClick(message)}
+                          style={{ maxWidth: '120px', cursor: 'pointer', borderRadius: '4px' }}
+                          muted
+                        />
+                      )}
+
                     </>
                   )}
 
@@ -241,7 +277,7 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser 
       </Card>
     ));
   };
-  
+
 
   return (
     <Card className="message-display-card">
@@ -301,28 +337,33 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser 
         )}
 
         {
-    previewMedia && (
-      <div className="media-preview-overlay" onClick={closePreview}>
-        <div className="media-preview-content" onClick={(e) => e.stopPropagation()}>
-          <button className="btn btn-danger mb-3" onClick={closePreview}>
-            Close
-          </button>
+          previewMedia && (
+            <div className="media-preview-overlay" onClick={closePreview}>
+              <div className="media-preview-content" onClick={(e) => e.stopPropagation()}>
+                <button className="btn btn-danger mb-3" onClick={closePreview}>
+                  Close
+                </button>
 
-          {previewMedia.type === 'image' && (
-            <img src={previewMedia.src} alt="Preview" style={{ maxWidth: '100%', borderRadius: '8px' }} />
-          )}
+                {previewMedia.type === 'image' && (
+                  <img src={previewMedia.src} alt="Preview" style={{ maxWidth: '100%', borderRadius: '8px' }} />
+                )}
 
-          {previewMedia.type === 'video' && (
-            <video src={previewMedia.src} controls style={{ maxWidth: '100%', borderRadius: '8px' }} />
-          )}
+                {previewMedia.type === 'video' && previewMedia.src && (
+                  <video
+                    src={previewMedia.src}
+                    controls
+                    autoPlay
+                    style={{ maxWidth: '100%', borderRadius: '8px' }}
+                  />
+                )}
 
-          {!['image', 'video'].includes(previewMedia.type) && (
-            <p className="text-muted">Preview not supported for this media type.</p>
-          )}
-        </div>
-      </div>
-    )
-  }
+                {!['image', 'video'].includes(previewMedia.type) && (
+                  <p className="text-muted">Preview not supported for this media type.</p>
+                )}
+              </div>
+            </div>
+          )
+        }
       </Card.Body>
     </Card>
   );

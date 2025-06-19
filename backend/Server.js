@@ -171,45 +171,57 @@ function initializeWhatsAppClient() {
     
     let mediaPath = null;
 
-if (message.hasMedia) {
-  console.log(`📦 Message from ${message.author} has media, attempting to download...`);
-
-  try {
-    const media = await message.downloadMedia();
-
-    if (!media) {
-      console.log('⚠️ media is null or undefined');
-    } else if (!media.data) {
-      console.log('⚠️ media.data is missing');
-    } else {
-      console.log('✅ Media object received:', {
-        mimetype: media.mimetype,
-        filename: media.filename,
-      });
-
-      const ext = media.mimetype.split('/')[1] || 'bin';
-      const filename = `media_${Date.now()}.${ext}`;
-      const mediaPath = path.join(__dirname, 'media', filename);
-
-      fs.writeFileSync(mediaPath, media.data, { encoding: 'base64' });
-      console.log(`✅ Media saved to: ${mediaPath}`);
-    }
-  } catch (err) {
-    console.error('❌ Error while downloading media:', err);
-  }
-}
-
-
 const messageData = {
-  id: message.id._serialized,
-  body: message.body,
-  author: message.author,
-  timestamp: message.timestamp,
-  type: message.type,
-  hasMedia: message.hasMedia,
-  from: message.from,
-  mediaPath // <-- this is the relative path to the downloaded media
-};
+    id: message.id._serialized,
+    body: message.body,
+    author: message.author,
+    timestamp: message.timestamp,
+    type: message.type,
+    hasMedia: message.hasMedia,
+    from: message.from,
+  };
+
+  if (message.hasMedia) {
+    console.log(`📦 Message has media. Type: ${message.type}, From: ${message.author}`);
+
+    try {
+      const media = await message.downloadMedia();
+
+      if (!media || !media.data) {
+        console.warn('⚠️ Media download failed');
+      } else {
+        console.log('✅ Media object received:', {
+          mimetype: media.mimetype,
+          filename: media.filename,
+          size: media.data.length
+        });
+
+        const ext = media.mimetype.split('/')[1] || 'bin';
+        const filename = `media_${Date.now()}.${ext}`;
+        const mediaPath = path.join(__dirname, 'media', filename);
+
+        fs.writeFileSync(mediaPath, media.data, { encoding: 'base64' });
+        console.log(`✅ Media saved to: ${mediaPath}`);
+
+        messageData.mediaPath = `media/${filename}`;
+      }
+    } catch (err) {
+      console.error('❌ Error while downloading media:', err);
+    }
+  }
+
+
+
+// const messageData = {
+//   id: message.id._serialized,
+//   body: message.body,
+//   author: message.author,
+//   timestamp: message.timestamp,
+//   type: message.type,
+//   hasMedia: message.hasMedia,
+//   from: message.from,
+//   mediaPath // <-- this is the relative path to the downloaded media
+// };
 
     
     messageHistory.push(messageData);
