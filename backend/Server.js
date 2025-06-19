@@ -324,27 +324,39 @@ app.post('/api/fetch-history', async (req, res) => {
     const chat = await client.getChatById(selectedGroup.id);
     const messages = await chat.fetchMessages({ limit });
     
-    const processedMessages = await Promise.all(
+   const processedMessages = await Promise.all(
   messages.map(async (msg) => {
-    let mediaPath = null;
+    const existing = messageHistory.find(m => m.id === msg.id._serialized);
+    let mediaPath = existing?.mediaPath || null;
+
+    console.log(`📝 Processing message: ${msg.id._serialized}`);
+
+    if (existing) {
+      console.log(`🔁 Message ${msg.id._serialized} already exists in messageHistory`);
+    }
 
     if (msg.hasMedia) {
-      try {
-        const media = await msg.downloadMedia();
+      if (mediaPath) {
+        console.log(`🗃️ Media for ${msg.id._serialized} already saved at: ${mediaPath}`);
+      } else {
+        try {
+          console.log(`📦 Attempting to download media for ${msg.id._serialized}`);
+          const media = await msg.downloadMedia();
 
-        if (media && media.data) {
-          const ext = media.mimetype.split('/')[1] || 'bin';
-          const filename = `media_${Date.now()}_${msg.id.id}.${ext}`;
-          mediaPath = path.join('media', filename); // relative for JSON
-          const fullPath = path.join(__dirname, mediaPath);
+          if (media && media.data) {
+            const ext = media.mimetype.split('/')[1] || 'bin';
+            const filename = `media_${Date.now()}_${msg.id.id}.${ext}`;
+            mediaPath = path.join('media', filename);
+            const fullPath = path.join(__dirname, mediaPath);
 
-          fs.writeFileSync(fullPath, media.data, { encoding: 'base64' });
-          console.log(`✅ [History] Saved media for message ${msg.id._serialized} to ${mediaPath}`);
-        } else {
-          console.warn(`⚠️ [History] Media empty or null for ${msg.id._serialized}`);
+            fs.writeFileSync(fullPath, media.data, { encoding: 'base64' });
+            console.log(`✅ Media downloaded and saved to: ${mediaPath}`);
+          } else {
+            console.warn(`⚠️ Media object missing or empty for ${msg.id._serialized}`);
+          }
+        } catch (err) {
+          console.error(`❌ Failed to download media for ${msg.id._serialized}:`, err.message);
         }
-      } catch (err) {
-        console.error(`❌ [History] Failed to download media for ${msg.id._serialized}:`, err.message);
       }
     }
 
@@ -356,10 +368,17 @@ app.post('/api/fetch-history', async (req, res) => {
       type: msg.type,
       hasMedia: msg.hasMedia,
       from: msg.from,
-      mediaPath, // Will be null if no media or failed
+      mediaPath,
     };
   })
 );
+
+// Ensure you're not appending duplicates to messageHistory on every fetch-history call. After the processedMessages,
+const newMessages = processedMessages.filter(
+  msg => !messageHistory.some(existing => existing.id === msg.id)
+);
+messageHistory = [...messageHistory, ...newMessages].sort((a, b) => a.timestamp - b.timestamp);
+
 
     
     // Filter by user if specified
