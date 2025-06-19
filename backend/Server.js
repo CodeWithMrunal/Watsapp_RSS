@@ -312,6 +312,23 @@ app.post('/api/select-user', (req, res) => {
   res.json({ success: true, selectedUser });
 });
 
+function updateMediaIndexFile() {
+  const mediaItems = messageHistory
+    .filter(msg => msg.hasMedia && msg.mediaPath)
+    .map(msg => ({
+      id: msg.id,
+      author: msg.author,
+      timestamp: msg.timestamp,
+      caption: msg.body || '',
+      type: msg.type,
+      mediaPath: msg.mediaPath, // relative path like media/media_123.jpg
+    }));
+
+  fs.writeFileSync('./media/media.json', JSON.stringify(mediaItems, null, 2));
+  console.log(`📦 media.json updated with ${mediaItems.length} items`);
+}
+
+
 app.post('/api/fetch-history', async (req, res) => {
       console.log('POST /api/fetch-history', req.body);
   const { limit = 50 } = req.body;
@@ -378,7 +395,7 @@ const newMessages = processedMessages.filter(
   msg => !messageHistory.some(existing => existing.id === msg.id)
 );
 messageHistory = [...messageHistory, ...newMessages].sort((a, b) => a.timestamp - b.timestamp);
-
+updateMediaIndexFile();
 
     
     // Filter by user if specified
