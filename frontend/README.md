@@ -17,12 +17,14 @@ Limitations:
 2. real time messages are not automatically displayed, we have to press fetch history
 3. diplay the image/ video in the frontend to do that use .json file
 4. trying to fetch chats immediately after login, not waiting for whatsapp client to get ready.
+5. messages.json stores only the history messages not the new ones coming.
 
 include .json file so that we can push the images back to backend database and also images to display it on frontend.
 
 understand if the process by which we are displaying content on the frontend , is it through json or through rss feed
 
 future scope: make it multi-tenant so that multiple user can login 
+
 
 
 

@@ -12,6 +12,7 @@ const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
+console.log('Server.js starting...');
 const io = new Server(server, {
   cors: {
     origin: "http://localhost:5173",
@@ -34,6 +35,9 @@ let rssFeed = null;
 
 // Ensure RSS directory exists
 fs.ensureDirSync('./rss');
+fs.ensureDirSync('./backups');
+fs.ensureDirSync('./media'); // For saving downloaded media
+
 
 // Initialize RSS Feed
 function initializeRSSFeed() {
@@ -82,10 +86,10 @@ function groupMessages(messages) {
 // Update RSS Feed
 function updateRSSFeed(messageGroup) {
   if (!rssFeed) return;
-  
+
   let description = '';
   let title = `Messages from ${messageGroup.author}`;
-  
+
   messageGroup.messages.forEach(msg => {
     if (msg.type === 'chat') {
       description += `<p>${msg.body}</p>`;
@@ -93,7 +97,7 @@ function updateRSSFeed(messageGroup) {
       description += `<p>[${msg.type.toUpperCase()}] ${msg.body || 'Media file'}</p>`;
     }
   });
-  
+
   rssFeed.item({
     title: title,
     description: description,
@@ -101,10 +105,14 @@ function updateRSSFeed(messageGroup) {
     date: new Date(messageGroup.timestamp * 1000),
     guid: messageGroup.id
   });
-  
-  // Write RSS to file
+
+  // Save both feed.xml and messages.json
   fs.writeFileSync('./rss/feed.xml', rssFeed.xml());
+  fs.writeFileSync('./rss/messages.json', JSON.stringify(messageHistory, null, 2));
+
+  console.log('✅ RSS feed and messageHistory exported');
 }
+
 
 // Initialize WhatsApp Client
 function initializeWhatsAppClient() {
@@ -117,6 +125,7 @@ function initializeWhatsAppClient() {
   });
 
   client.on('qr', (qr) => {
+    console.log('Received QR event');
     qrcode.toDataURL(qr, (err, url) => {
       if (err) {
         console.error('Error generating QR code:', err);
@@ -151,6 +160,7 @@ function initializeWhatsAppClient() {
   });
 
   client.on('message', async (message) => {
+    console.log('Received message:', message.body);
     if (!selectedGroup || !message.from.includes('@g.us')) return;
     
     if (message.from !== selectedGroup.id) return;
@@ -158,15 +168,48 @@ function initializeWhatsAppClient() {
     // Filter by user if specified
     if (selectedUser && message.author !== selectedUser) return;
     
-    const messageData = {
-      id: message.id._serialized,
-      body: message.body,
-      author: message.author,
-      timestamp: message.timestamp,
-      type: message.type,
-      hasMedia: message.hasMedia,
-      from: message.from
-    };
+    let mediaPath = null;
+
+if (message.hasMedia) {
+  console.log(`📦 Message from ${message.author} has media, attempting to download...`);
+
+  try {
+    const media = await message.downloadMedia();
+
+    if (!media) {
+      console.log('⚠️ media is null or undefined');
+    } else if (!media.data) {
+      console.log('⚠️ media.data is missing');
+    } else {
+      console.log('✅ Media object received:', {
+        mimetype: media.mimetype,
+        filename: media.filename,
+      });
+
+      const ext = media.mimetype.split('/')[1] || 'bin';
+      const filename = `media_${Date.now()}.${ext}`;
+      const mediaPath = path.join(__dirname, 'media', filename);
+
+      fs.writeFileSync(mediaPath, media.data, { encoding: 'base64' });
+      console.log(`✅ Media saved to: ${mediaPath}`);
+    }
+  } catch (err) {
+    console.error('❌ Error while downloading media:', err);
+  }
+}
+
+
+const messageData = {
+  id: message.id._serialized,
+  body: message.body,
+  author: message.author,
+  timestamp: message.timestamp,
+  type: message.type,
+  hasMedia: message.hasMedia,
+  from: message.from,
+  mediaPath // <-- this is the relative path to the downloaded media
+};
+
     
     messageHistory.push(messageData);
     
@@ -191,6 +234,8 @@ app.get('/api/status', (req, res) => {
 });
 
 app.get('/api/groups', async (req, res) => {
+    console.log('GET /api/groups');
+
   if (!isAuthenticated || !client) {
     return res.status(401).json({ error: 'WhatsApp not authenticated' });
   }
@@ -213,6 +258,8 @@ app.get('/api/groups', async (req, res) => {
 });
 
 app.post('/api/select-group', async (req, res) => {
+    console.log('POST /api/select-group', req.body);
+
   const { groupId } = req.body;
   
   if (!isAuthenticated || !client) {
@@ -239,6 +286,7 @@ app.post('/api/select-group', async (req, res) => {
 });
 
 app.get('/api/group-participants', async (req, res) => {
+    console.log('GET /api/group-participants');
   if (!selectedGroup) {
     return res.status(400).json({ error: 'No group selected' });
   }
@@ -258,12 +306,14 @@ app.get('/api/group-participants', async (req, res) => {
 });
 
 app.post('/api/select-user', (req, res) => {
+    console.log('POST /api/select-user', req.body);
   const { userId } = req.body;
   selectedUser = userId === 'all' ? null : userId;
   res.json({ success: true, selectedUser });
 });
 
 app.post('/api/fetch-history', async (req, res) => {
+      console.log('POST /api/fetch-history', req.body);
   const { limit = 50 } = req.body;
   
   if (!selectedGroup || !client) {
@@ -319,6 +369,23 @@ app.post('/api/initialize', (req, res) => {
     initializeRSSFeed();
   }
   res.json({ success: true });
+});
+
+app.post('/api/backup-messages', (req, res) => {
+  if (!messageHistory || messageHistory.length === 0) {
+    return res.status(400).json({ error: 'No messages to backup' });
+  }
+
+  const timestamp = moment().format('YYYY-MM-DD_HH-mm-ss');
+  const filename = `./backups/messages-${timestamp}.json`;
+
+  try {
+    fs.writeFileSync(filename, JSON.stringify(messageHistory, null, 2));
+    res.json({ success: true, message: `Messages backed up to ${filename}` });
+  } catch (err) {
+    console.error('❌ Failed to write backup:', err);
+    res.status(500).json({ error: 'Failed to write backup file' });
+  }
 });
 
 // Socket.IO connection handling
