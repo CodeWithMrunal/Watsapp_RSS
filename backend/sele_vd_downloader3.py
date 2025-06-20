@@ -18,7 +18,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 class LinkDownloadManager:
-    def __init__(self, messages_file="rss/messages.json", media_file="media.json", download_dir="media"):
+    def __init__(self, messages_file="rss/messages.json", media_file="media/media.json", download_dir="media"):
         self.messages_file = Path(messages_file).resolve()
         self.media_file = Path(media_file).resolve()
         self.download_dir = Path(download_dir)
@@ -44,10 +44,9 @@ class LinkDownloadManager:
         print(f"📁 Download directory: {self.download_dir.absolute()}")
         print(f"📄 Messages file: {self.messages_file.absolute()}")
         print(f"📄 Media file: {self.media_file.absolute()}")
-        
-        # Store initial file state
+         # Store initial file state
         self.update_file_state()
-    
+
     def update_file_state(self):
         """Update the current state of the messages file"""
         try:
@@ -205,7 +204,7 @@ class LinkDownloadManager:
                         "original_timestamp": link_info['timestamp'],
                         "caption": f"Auto-downloaded from: {link_info['url'][:50]}...",
                         "type": media_type,
-                        "mediaPath": str(file_path.relative_to(Path.cwd())),
+                        "mediaPath": f"media/{file_path.name}",
                         "source_link": link_info['url'],
                         "source_message_id": link_info['message_id'],
                         "source_message_body": link_info['message_body'],
@@ -855,119 +854,7 @@ def main():
     
     download_manager.cleanup()
     print("👋 Goodbye!")
-
-
-def run_once():
-    """Run the downloader once without monitoring"""
-    print("🚀 One-time Link Processing Mode")
-    print("=" * 40)
     
-    download_manager = LinkDownloadManager()
-    
-    try:
-        download_manager.process_new_links(force=True)
-    finally:
-        download_manager.cleanup()
-
-
-def test_file_monitoring():
-    """Test if file monitoring is working properly"""
-    print("🧪 Testing File Monitoring")
-    print("=" * 30)
-    
-    messages_file = Path("rss/messages.json")
-    if not messages_file.exists():
-        print("❌ messages.json not found")
-        return
-    
-    print(f"📄 Monitoring: {messages_file.absolute()}")
-    
-    class TestHandler(FileSystemEventHandler):
-        def __init__(self):
-            self.events = []
-        
-        def on_modified(self, event):
-            if not event.is_directory:
-                event_path = Path(event.src_path).resolve()
-                self.events.append((time.time(), event_path))
-                print(f"🔔 File modified: {event_path}")
-    
-    handler = TestHandler()
-    observer = Observer()
-    observer.schedule(handler, path=str(messages_file.parent), recursive=False)
-    observer.start()
-    
-    print("✅ File monitoring started")
-    print("💡 Try modifying messages.json in another program")
-    print("💡 Press Ctrl+C to stop test")
-    
-    try:
-        start_time = time.time()
-        while time.time() - start_time < 60:  # Run for 1 minute
-            time.sleep(1)
-            if len(handler.events) > 0:
-                print(f"✅ Detected {len(handler.events)} file events")
-                for event_time, path in handler.events[-3:]:  # Show last 3 events
-                    print(f"   {datetime.fromtimestamp(event_time).strftime('%H:%M:%S')} - {path.name}")
-    except KeyboardInterrupt:
-        pass
-    
-    observer.stop()
-    observer.join()
-    
-    if len(handler.events) == 0:
-        print("⚠️ No file events detected. Consider using polling mode.")
-    else:
-        print(f"✅ File monitoring working! Detected {len(handler.events)} events")
-
-
-def debug_messages_file():
-    """Debug the messages.json file to check for links"""
-    print("🔍 Debugging messages.json")
-    print("=" * 30)
-    
-    manager = LinkDownloadManager()
-    
-    print(f"📄 File path: {manager.messages_file}")
-    print(f"📄 File exists: {manager.messages_file.exists()}")
-    
-    if manager.messages_file.exists():
-        stat = manager.messages_file.stat()
-        print(f"📊 File size: {stat.st_size} bytes")
-        print(f"📊 Last modified: {datetime.fromtimestamp(stat.st_mtime)}")
-        
-        # Extract and show links
-        links = manager.extract_links_from_messages()
-        print(f"\n🔗 Found {len(links)} links:")
-        
-        for i, link in enumerate(links[:5], 1):  # Show first 5 links
-            processed = manager.is_link_processed(link['url'])
-            status = "✅ Processed" if processed else "🆕 New"
-            print(f"  {i}. {status} - {link['url'][:60]}...")
-            print(f"     Author: {link['author']}, Time: {datetime.fromtimestamp(link['timestamp'])}")
-        
-        if len(links) > 5:
-            print(f"     ... and {len(links) - 5} more")
-        
-        # Show processed links
-        print(f"\n📚 Previously processed: {len(manager.processed_links)} links")
-
-
 if __name__ == "__main__":
     import sys
-    
-    if len(sys.argv) > 1:
-        if sys.argv[1] == '--once':
-            run_once()
-        elif sys.argv[1] == '--test':
-            test_file_monitoring()
-        elif sys.argv[1] == '--debug':
-            debug_messages_file()
-        else:
-            print("Usage:")
-            print("  python script.py           # Run with monitoring")
-            print("  python script.py --once    # Process links once and exit")
-            print("  python script.py --test    # Test file monitoring")
-            print("  python script.py --debug   # Debug messages.json")
-    else:
-        main()
+    main()
