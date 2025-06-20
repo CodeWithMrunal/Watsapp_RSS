@@ -1,5 +1,6 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
+const fs = require('fs-extra');
 const path = require('path');
 const config = require('../config');
 const FileUtils = require('../utils/fileUtils');
@@ -16,14 +17,37 @@ class WhatsAppManager {
     this.messageHistory = [];
   }
 
+  // Enhanced initialize method to handle re-initialization
   initialize() {
+    console.log('🔄 Initializing WhatsApp client...');
+    
+    // If client already exists, destroy it first
+    if (this.client) {
+      console.log('🗑️ Destroying existing client...');
+      try {
+        this.client.destroy();
+      } catch (error) {
+        console.warn('⚠️ Error destroying existing client:', error);
+      }
+    }
+
+    // Reset state
+    this.isAuthenticated = false;
+    this.selectedGroup = null;
+    this.selectedUser = null;
+    this.messageHistory = [];
+
+    // Create new client
     this.client = new Client({
       authStrategy: new LocalAuth(),
       puppeteer: config.whatsapp.puppeteer
     });
 
     this.setupEventHandlers();
+    
+    // Initialize the client
     this.client.initialize();
+    console.log('✅ WhatsApp client initialization started');
   }
 
   setupEventHandlers() {
@@ -59,6 +83,9 @@ class WhatsAppManager {
     this.client.on('disconnected', (reason) => {
       console.log('WhatsApp client disconnected:', reason);
       this.isAuthenticated = false;
+      this.selectedGroup = null;
+      this.selectedUser = null;
+      this.messageHistory = [];
       this.io.emit('disconnected', reason);
     });
 
@@ -217,6 +244,75 @@ class WhatsAppManager {
       return MessageUtils.groupMessages(this.messageHistory);
     }
     return this.messageHistory;
+  }
+
+  // NEW: Logout functionality
+  async logout() {
+    console.log('🔓 Logging out WhatsApp session...');
+    
+    try {
+      if (this.client) {
+        // Destroy the WhatsApp client
+        await this.client.destroy();
+        console.log('✅ WhatsApp client destroyed');
+      }
+      
+      // Delete authentication folders to force fresh login
+      const authFolders = ['.wwebjs_auth', '.wwebjs_cache'];
+      
+      for (const folder of authFolders) {
+        try {
+          if (fs.existsSync(folder)) {
+            await fs.remove(folder);
+            console.log(`🗑️ Deleted ${folder} folder`);
+          }
+        } catch (error) {
+          console.warn(`⚠️ Could not delete ${folder}:`, error);
+        }
+      }
+      
+      // Reset all state
+      this.isAuthenticated = false;
+      this.selectedGroup = null;
+      this.selectedUser = null;
+      this.messageHistory = [];
+      this.client = null;
+      
+      // Reset RSS manager
+      if (this.rssManager) {
+        this.rssManager.reset();
+      }
+      
+      // Emit disconnected event to all clients
+      this.io.emit('disconnected', 'User logged out');
+      
+      console.log('✅ Logout completed successfully');
+      
+    } catch (error) {
+      console.error('❌ Error during logout:', error);
+      
+      // Force reset state even if client destruction fails
+      this.isAuthenticated = false;
+      this.selectedGroup = null;
+      this.selectedUser = null;
+      this.messageHistory = [];
+      this.client = null;
+      
+      this.io.emit('disconnected', 'Logout error but state reset');
+      
+      throw error;
+    }
+  }
+
+  // Enhanced initialize method to handle re-initialization
+  initialize() {
+    this.client = new Client({
+      authStrategy: new LocalAuth(),
+      puppeteer: config.whatsapp.puppeteer
+    });
+
+    this.setupEventHandlers();
+    this.client.initialize();
   }
 
   getStatus() {

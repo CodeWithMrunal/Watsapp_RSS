@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Card, Button, Badge, Form, Alert, ListGroup, Collapse } from 'react-bootstrap';
 import moment from 'moment';
 
-function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser }) {
+function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser, selectedGroup, onGoBackToUserFilter }) {
   const [expandedGroups, setExpandedGroups] = useState(new Set());
   const [previewMedia, setPreviewMedia] = useState(null);
 
@@ -14,7 +14,6 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser 
       console.log("msg.mediapath is undefined");
     }
   };
-
 
   const closePreview = () => setPreviewMedia(null);
 
@@ -128,7 +127,6 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser 
                       )}
                     </>
                   )}
-
                 </div>
               </div>
             </div>
@@ -167,7 +165,6 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser 
                           <p className="mb-0">{message.body}</p>
                         ) : (
                           <>
-
                             <span
                               className="text-primary clickable"
                               onClick={() => handleMediaClick(message)}
@@ -192,9 +189,7 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser 
                                 muted
                               />
                             )}
-
                           </>
-
                         )}
                       </div>
                     </div>
@@ -264,20 +259,16 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser 
                           muted
                         />
                       )}
-
                     </>
                   )}
-
                 </div>
               </div>
             </div>
           </div>
-
         </Card.Body>
       </Card>
     ));
   };
-
 
   return (
     <Card className="message-display-card">
@@ -292,8 +283,26 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser 
               </Badge>
             )}
           </h5>
+          {selectedGroup && (
+            <small className="text-muted d-block">
+              Group: {selectedGroup.name}
+              {selectedUser && ` | User: ${selectedUser}`}
+            </small>
+          )}
         </div>
         <div className="d-flex align-items-center">
+          {selectedUser && (
+            <Button
+              variant="outline-secondary"
+              size="sm"
+              onClick={onGoBackToUserFilter}
+              className="me-2"
+              title="Clear user filter"
+            >
+              <i className="fas fa-user-times me-1"></i>
+              Clear Filter
+            </Button>
+          )}
           <Form.Check
             type="switch"
             id="group-toggle"
@@ -336,34 +345,32 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser 
           </div>
         )}
 
-        {
-          previewMedia && (
-            <div className="media-preview-overlay" onClick={closePreview}>
-              <div className="media-preview-content" onClick={(e) => e.stopPropagation()}>
-                <button className="btn btn-danger mb-3" onClick={closePreview}>
-                  Close
-                </button>
+        {previewMedia && (
+          <div className="media-preview-overlay" onClick={closePreview}>
+            <div className="media-preview-content" onClick={(e) => e.stopPropagation()}>
+              <button className="btn btn-danger mb-3" onClick={closePreview}>
+                Close
+              </button>
 
-                {previewMedia.type === 'image' && (
-                  <img src={previewMedia.src} alt="Preview" style={{ maxWidth: '100%', borderRadius: '8px' }} />
-                )}
+              {previewMedia.type === 'image' && (
+                <img src={previewMedia.src} alt="Preview" style={{ maxWidth: '100%', borderRadius: '8px' }} />
+              )}
 
-                {previewMedia.type === 'video' && previewMedia.src && (
-                  <video
-                    src={previewMedia.src}
-                    controls
-                    autoPlay
-                    style={{ maxWidth: '100%', borderRadius: '8px' }}
-                  />
-                )}
+              {previewMedia.type === 'video' && previewMedia.src && (
+                <video
+                  src={previewMedia.src}
+                  controls
+                  autoPlay
+                  style={{ maxWidth: '100%', borderRadius: '8px' }}
+                />
+              )}
 
-                {!['image', 'video'].includes(previewMedia.type) && (
-                  <p className="text-muted">Preview not supported for this media type.</p>
-                )}
-              </div>
+              {!['image', 'video'].includes(previewMedia.type) && (
+                <p className="text-muted">Preview not supported for this media type.</p>
+              )}
             </div>
-          )
-        }
+          </div>
+        )}
       </Card.Body>
     </Card>
   );

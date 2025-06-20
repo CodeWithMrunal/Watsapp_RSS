@@ -12,44 +12,80 @@ function WhatsAppLogin({ socket }) {
 
   useEffect(() => {
     if (socket) {
-      socket.on('qr', (qrDataUrl) => {
+      // Clear previous state when socket changes
+      setQrCode('');
+      setIsWaitingForScan(false);
+      setIsInitializing(false);
+      setError('');
+
+      const handleQR = (qrDataUrl) => {
+        console.log('📱 QR code received');
         setQrCode(qrDataUrl);
         setIsWaitingForScan(true);
         setIsInitializing(false);
-      });
+        setError('');
+      };
 
-      socket.on('authenticated', () => {
+      const handleAuthenticated = () => {
+        console.log('✅ WhatsApp authenticated');
         setQrCode('');
         setIsWaitingForScan(false);
         setIsInitializing(false);
-      });
+        setError('');
+      };
 
-      socket.on('auth_failure', (msg) => {
+      const handleAuthFailure = (msg) => {
+        console.error('❌ Authentication failed:', msg);
         setError(`Authentication failed: ${msg}`);
         setIsInitializing(false);
         setIsWaitingForScan(false);
-      });
-    }
+        setQrCode('');
+      };
 
-    return () => {
-      if (socket) {
-        socket.off('qr');
-        socket.off('authenticated');
-        socket.off('auth_failure');
-      }
-    };
+      const handleDisconnected = (reason) => {
+        console.log('🔌 WhatsApp disconnected:', reason);
+        setQrCode('');
+        setIsWaitingForScan(false);
+        setIsInitializing(false);
+        
+        // Only show error if it's not a user-initiated logout
+        if (reason !== 'User logged out' && reason !== 'Logout error but state reset') {
+          setError(`Disconnected: ${reason}`);
+        }
+      };
+
+      socket.on('qr', handleQR);
+      socket.on('authenticated', handleAuthenticated);
+      socket.on('auth_failure', handleAuthFailure);
+      socket.on('disconnected', handleDisconnected);
+
+      return () => {
+        socket.off('qr', handleQR);
+        socket.off('authenticated', handleAuthenticated);
+        socket.off('auth_failure', handleAuthFailure);
+        socket.off('disconnected', handleDisconnected);
+      };
+    }
   }, [socket]);
 
   const handleInitialize = async () => {
     setIsInitializing(true);
     setError('');
+    setQrCode('');
+    setIsWaitingForScan(false);
+    
+    console.log('🚀 Initializing WhatsApp connection...');
     
     try {
-      await axios.post(`${API_BASE}/api/initialize`);
+      const response = await axios.post(`${API_BASE}/api/initialize`);
+      console.log('✅ Initialize request sent successfully');
+      
+      // Don't set isInitializing to false here - let the QR event or error handle it
+      
     } catch (error) {
+      console.error('❌ Initialization error:', error);
       setError('Failed to initialize WhatsApp client');
       setIsInitializing(false);
-      console.error('Initialization error:', error);
     }
   };
 
@@ -64,7 +100,7 @@ function WhatsAppLogin({ socket }) {
         </Card.Header>
         <Card.Body className="text-center p-4">
           {error && (
-            <Alert variant="danger" className="mb-3">
+            <Alert variant="danger" className="mb-3" dismissible onClose={() => setError('')}>
               {error}
             </Alert>
           )}
@@ -90,6 +126,7 @@ function WhatsAppLogin({ socket }) {
             <div>
               <Spinner animation="border" variant="success" className="mb-3" />
               <p className="text-muted">Initializing WhatsApp connection...</p>
+              <small className="text-muted d-block">This may take a few seconds...</small>
             </div>
           )}
 
@@ -109,6 +146,16 @@ function WhatsAppLogin({ socket }) {
               <div className="d-flex align-items-center justify-content-center">
                 <Spinner animation="border" size="sm" variant="success" className="me-2" />
                 <small className="text-muted">Waiting for scan...</small>
+              </div>
+              <div className="mt-3">
+                <Button 
+                  variant="outline-secondary" 
+                  size="sm" 
+                  onClick={handleInitialize}
+                >
+                  <i className="fas fa-redo me-1"></i>
+                  Generate New QR Code
+                </Button>
               </div>
             </div>
           )}

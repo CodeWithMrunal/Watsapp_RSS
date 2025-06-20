@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Container, Row, Col, Card, Alert } from 'react-bootstrap';
+import { Container, Row, Col, Card, Alert, Button } from 'react-bootstrap';
 import io from 'socket.io-client';
 import axios from 'axios';
 import WhatsAppLogin from './components/WhatsAppLogin';
@@ -31,8 +31,13 @@ function App() {
       setError('');
     });
 
-    newSocket.on('disconnect', () => {
+    newSocket.on('disconnected', (reason) => {
+      console.log('WhatsApp disconnected:', reason);
       setStatus('disconnected');
+      setIsAuthenticated(false);
+      setSelectedGroup(null);
+      setSelectedUser(null);
+      setMessages([]);
     });
 
     newSocket.on('authenticated', () => {
@@ -104,13 +109,57 @@ function App() {
     setShowGrouped(!showGrouped);
   };
 
+  // Go back functions
+  const handleGoBackToGroups = () => {
+    setSelectedGroup(null);
+    setSelectedUser(null);
+    setMessages([]);
+  };
+
+  const handleGoBackToUserFilter = () => {
+    setSelectedUser(null);
+    setMessages([]);
+  };
+
+  const handleLogout = async () => {
+    try {
+      await axios.post(`${API_BASE}/api/logout`);
+      
+      // Reset all state immediately
+      setIsAuthenticated(false);
+      setSelectedGroup(null);
+      setSelectedUser(null);
+      setMessages([]);
+      setStatus('disconnected');
+      setError('');
+      
+      console.log('✅ Logout successful, state reset');
+      
+    } catch (error) {
+      console.error('Error logging out:', error);
+      setError('Failed to logout properly');
+      
+      // Force reset state even if logout call fails
+      setIsAuthenticated(false);
+      setSelectedGroup(null);
+      setSelectedUser(null);
+      setMessages([]);
+      setStatus('disconnected');
+    }
+  };
+
   const renderCurrentStep = () => {
     if (!isAuthenticated) {
       return <WhatsAppLogin socket={socket} />;
     }
     
     if (!selectedGroup) {
-      return <GroupSelection onGroupSelected={handleGroupSelected} />;
+      return (
+        <GroupSelection 
+          onGroupSelected={handleGroupSelected}
+          onLogout={handleLogout}
+        />
+      );
     }
     
     return (
@@ -120,12 +169,15 @@ function App() {
           selectedUser={selectedUser}
           onUserSelected={handleUserSelected}
           onFetchHistory={handleFetchHistory}
+          onGoBack={handleGoBackToGroups}
         />
         <MessageDisplay 
           messages={messages}
           showGrouped={showGrouped}
           onToggleGrouping={handleToggleGrouping}
           selectedUser={selectedUser}
+          selectedGroup={selectedGroup}
+          onGoBackToUserFilter={handleGoBackToUserFilter}
         />
       </>
     );
@@ -145,6 +197,17 @@ function App() {
                 {status === 'authenticated' ? 'WhatsApp Connected' :
                  status === 'connected' ? 'Server Connected' : 'Disconnected'}
               </span>
+              {isAuthenticated && (
+                <Button
+                  variant="outline-danger"
+                  size="sm"
+                  className="ms-2"
+                  onClick={handleLogout}
+                  title="Disconnect WhatsApp"
+                >
+                  <i className="fas fa-sign-out-alt"></i>
+                </Button>
+              )}
             </div>
           </div>
 

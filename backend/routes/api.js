@@ -94,6 +94,19 @@ function createApiRoutes(whatsappManager) {
     }
   });
 
+  // NEW: Logout endpoint
+  router.post('/logout', async (req, res) => {
+    console.log('POST /api/logout - Logging out WhatsApp session');
+    
+    try {
+      await whatsappManager.logout();
+      res.json({ success: true, message: 'Successfully logged out' });
+    } catch (error) {
+      console.error('Error during logout:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   router.post('/backup-messages', (req, res) => {
     const messageHistory = whatsappManager.messageHistory;
     

@@ -4,7 +4,7 @@ import axios from 'axios';
 
 const API_BASE = 'http://localhost:3001';
 
-function UserFilter({ selectedGroup, selectedUser, onUserSelected, onFetchHistory }) {
+function UserFilter({ selectedGroup, selectedUser, onUserSelected, onFetchHistory, onGoBack }) {
   const [participants, setParticipants] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -55,11 +55,20 @@ function UserFilter({ selectedGroup, selectedUser, onUserSelected, onFetchHistor
 
   return (
     <Card className="user-filter-card mb-4">
-      <Card.Header className="bg-info text-white">
+      <Card.Header className="bg-info text-white d-flex justify-content-between align-items-center">
         <h5 className="mb-0">
           <i className="fas fa-filter me-2"></i>
           Message Filters & History
         </h5>
+        <Button
+          variant="outline-light"
+          size="sm"
+          onClick={onGoBack}
+          title="Go back to group selection"
+        >
+          <i className="fas fa-arrow-left me-1"></i>
+          Change Group
+        </Button>
       </Card.Header>
       <Card.Body>
         {error && (
@@ -163,6 +172,7 @@ function UserFilter({ selectedGroup, selectedUser, onUserSelected, onFetchHistor
             <li>Click "Fetch History" to load past messages based on your current filter</li>
             <li>New messages will appear in real-time and be added to the RSS feed</li>
             <li>Messages from the same user within 5 minutes are grouped together</li>
+            <li>Use "Change Group" to switch to monitoring a different WhatsApp group</li>
           </ul>
         </div>
       </Card.Body>

@@ -4,7 +4,7 @@ import axios from 'axios';
 
 const API_BASE = 'http://localhost:3001';
 
-function GroupSelection({ onGroupSelected }) {
+function GroupSelection({ onGroupSelected, onLogout }) {
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -59,11 +59,20 @@ function GroupSelection({ onGroupSelected }) {
 
   return (
     <Card className="group-selection-card">
-      <Card.Header className="bg-primary text-white">
+      <Card.Header className="bg-primary text-white d-flex justify-content-between align-items-center">
         <h5 className="mb-0">
           <i className="fas fa-users me-2"></i>
           Select WhatsApp Group to Monitor
         </h5>
+        <Button
+          variant="outline-light"
+          size="sm"
+          onClick={onLogout}
+          title="Disconnect WhatsApp"
+        >
+          <i className="fas fa-sign-out-alt me-1"></i>
+          Disconnect
+        </Button>
       </Card.Header>
       <Card.Body>
         {error && (
