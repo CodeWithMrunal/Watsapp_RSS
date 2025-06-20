@@ -387,7 +387,7 @@ class SeleniumVideoDownloader:
             return False
     
     def wait_for_download_completion(self, timeout=300):
-        """Wait for download to complete"""
+        """Wait for download to complete - Enhanced for small files"""
         print("⏳ Waiting for download to complete...")
         start_time = time.time()
         
@@ -403,55 +403,127 @@ class SeleniumVideoDownloader:
         except Exception as e:
             print(f"⚠️ Error reading initial files: {e}")
         
-        check_interval = 0.5
+        print(f"📊 Initial files in directory: {len(initial_files)}")
+        
+        # For very small files, use shorter intervals and timeouts
+        check_interval = 0.2  # Check every 200ms for faster detection
         last_check_time = start_time
+        min_wait_time = 2  # Minimum wait time before giving up
+        
+        # Quick initial check (small files might download immediately)
+        time.sleep(0.5)
         
         while time.time() - start_time < timeout:
             try:
+                current_time = time.time()
+                
                 # Check for .crdownload files (Chrome partial downloads)
                 crdownload_files = list(self.download_dir.glob("*.crdownload"))
                 if crdownload_files:
                     print(f"📥 Download in progress: {crdownload_files[0].name}")
-                    time.sleep(2)
+                    time.sleep(1)
                     continue
                 
-                # Check for new files
+                # Check for .tmp files (temporary downloads)
+                tmp_files = list(self.download_dir.glob("*.tmp"))
+                if tmp_files:
+                    print(f"📥 Temporary file detected: {tmp_files[0].name}")
+                    time.sleep(1)
+                    continue
+                
+                # Get current file state
                 current_files = set()
                 current_sizes = {}
                 
                 for f in self.download_dir.iterdir():
-                    if f.is_file():
+                    if f.is_file() and not f.name.startswith('.'):  # Skip hidden files
                         current_files.add(f.name)
                         current_sizes[f.name] = f.stat().st_size
                 
+                # Check for new files
                 new_files = current_files - initial_files
                 
                 if new_files:
                     print(f"✅ Download completed!")
                     for filename in new_files:
                         file_size = current_sizes.get(filename, 0)
-                        print(f"📁 Downloaded: {filename} ({file_size} bytes)")
+                        file_size_kb = file_size / 1024
+                        if file_size < 1024:
+                            print(f"📁 Downloaded: {filename} ({file_size} bytes)")
+                        elif file_size < 1024 * 1024:
+                            print(f"📁 Downloaded: {filename} ({file_size_kb:.1f} KB)")
+                        else:
+                            file_size_mb = file_size / (1024 * 1024)
+                            print(f"📁 Downloaded: {filename} ({file_size_mb:.1f} MB)")
                     return True
                 
-                # Check for files that have grown in size
+                # Check for files that have grown in size (ongoing downloads)
                 for filename in current_files & initial_files:
-                    if current_sizes.get(filename, 0) > initial_sizes.get(filename, 0):
-                        print(f"✅ Existing file updated: {filename}")
+                    old_size = initial_sizes.get(filename, 0)
+                    new_size = current_sizes.get(filename, 0)
+                    if new_size > old_size:
+                        print(f"✅ Existing file updated: {filename} (grew by {new_size - old_size} bytes)")
                         return True
                 
-                # Print status every 10 seconds
-                if time.time() - last_check_time > 10:
-                    elapsed = int(time.time() - start_time)
-                    print(f"⏱️ Still waiting... ({elapsed}s elapsed)")
-                    last_check_time = time.time()
+                # For small files, check if we've waited long enough
+                elapsed = current_time - start_time
+                if elapsed >= min_wait_time:
+                    # Do a final comprehensive check for any files that might have been missed
+                    final_files = set()
+                    try:
+                        for f in self.download_dir.iterdir():
+                            if f.is_file() and not f.name.startswith('.'):
+                                stat_info = f.stat()
+                                # Check if file was created/modified recently (within last 30 seconds)
+                                if current_time - stat_info.st_mtime < 30:
+                                    final_files.add(f.name)
+                        
+                        recent_new_files = final_files - initial_files
+                        if recent_new_files:
+                            print(f"✅ Found recently created files: {list(recent_new_files)}")
+                            for filename in recent_new_files:
+                                file_path = self.download_dir / filename
+                                if file_path.exists():
+                                    file_size = file_path.stat().st_size
+                                    print(f"📁 Recently downloaded: {filename} ({file_size} bytes)")
+                            return True
+                    except Exception as e:
+                        print(f"⚠️ Error in final file check: {e}")
+                
+                # Print status less frequently for small files
+                if current_time - last_check_time > 5:  # Every 5 seconds instead of 10
+                    elapsed = int(current_time - start_time)
+                    current_file_count = len(current_files)
+                    print(f"⏱️ Still waiting... ({elapsed}s elapsed, {current_file_count} files in directory)")
+                    
+                    # For debugging small files, show what files are currently there
+                    if elapsed > 10:  # After 10 seconds, show more details
+                        print(f"🔍 Current files: {list(current_files)[:3]}{'...' if len(current_files) > 3 else ''}")
+                    
+                    last_check_time = current_time
                 
                 time.sleep(check_interval)
                 
             except Exception as e:
                 print(f"⚠️ Error during download check: {e}")
-                time.sleep(1)
+                time.sleep(0.5)
         
-        print("⚠️ Download timeout reached")
+        # Final timeout check - sometimes small files download but we miss them
+        print("⚠️ Download timeout reached, doing final check...")
+        try:
+            final_files = set(f.name for f in self.download_dir.iterdir() if f.is_file() and not f.name.startswith('.'))
+            final_new_files = final_files - initial_files
+            if final_new_files:
+                print(f"✅ Found files after timeout: {list(final_new_files)}")
+                for filename in final_new_files:
+                    file_path = self.download_dir / filename
+                    if file_path.exists():
+                        file_size = file_path.stat().st_size
+                        print(f"📁 Final check found: {filename} ({file_size} bytes)")
+                return True
+        except Exception as e:
+            print(f"⚠️ Error in final timeout check: {e}")
+        
         return False
 
     def handle_google_drive_virus_warning(self):
