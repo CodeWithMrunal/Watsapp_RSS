@@ -3,6 +3,7 @@ import re
 import json
 import time
 import hashlib
+import threading
 from pathlib import Path
 from datetime import datetime
 from selenium import webdriver
@@ -18,17 +19,24 @@ from watchdog.events import FileSystemEventHandler
 
 class LinkDownloadManager:
     def __init__(self, messages_file="rss/messages.json", media_file="media.json", download_dir="media"):
-        self.messages_file = Path(messages_file)
-        self.media_file = Path(media_file)
+        self.messages_file = Path(messages_file).resolve()
+        self.media_file = Path(media_file).resolve()
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(exist_ok=True)
         
         # Track processed links to avoid duplicates
         self.processed_links = set()
-        self.link_to_media_map = {}  # Maps link hash to media file info
+        self.link_to_media_map = {}
+        self.last_messages_content = ""
+        self.last_file_size = 0
+        self.last_modification_time = 0
         
-        # Initialize downloader
-        self.downloader = SeleniumVideoDownloader(download_dir=str(self.download_dir), headless=True)
+        # Thread safety
+        self.processing_lock = threading.Lock()
+        self.is_processing = False
+        
+        # Initialize downloader (will be created per download to avoid conflicts)
+        self.downloader = None
         
         # Load existing processed links
         self.load_processed_links()
@@ -36,6 +44,55 @@ class LinkDownloadManager:
         print(f"📁 Download directory: {self.download_dir.absolute()}")
         print(f"📄 Messages file: {self.messages_file.absolute()}")
         print(f"📄 Media file: {self.media_file.absolute()}")
+        
+        # Store initial file state
+        self.update_file_state()
+    
+    def update_file_state(self):
+        """Update the current state of the messages file"""
+        try:
+            if self.messages_file.exists():
+                stat = self.messages_file.stat()
+                self.last_modification_time = stat.st_mtime
+                self.last_file_size = stat.st_size
+                
+                with open(self.messages_file, 'r', encoding='utf-8') as f:
+                    self.last_messages_content = f.read()
+                    
+                print(f"📊 File state updated - Size: {self.last_file_size}, Modified: {datetime.fromtimestamp(self.last_modification_time)}")
+        except Exception as e:
+            print(f"⚠️ Error updating file state: {e}")
+    
+    def has_file_changed(self):
+        """Check if the messages file has actually changed"""
+        try:
+            if not self.messages_file.exists():
+                return False
+                
+            stat = self.messages_file.stat()
+            current_mtime = stat.st_mtime
+            current_size = stat.st_size
+            
+            # Check modification time and size first (quick check)
+            if current_mtime <= self.last_modification_time and current_size == self.last_file_size:
+                return False
+            
+            # If time/size changed, check content
+            with open(self.messages_file, 'r', encoding='utf-8') as f:
+                current_content = f.read()
+            
+            if current_content == self.last_messages_content:
+                # File was touched but content didn't change
+                self.last_modification_time = current_mtime
+                self.last_file_size = current_size
+                return False
+            
+            print(f"📄 File content changed - New size: {current_size}, Old size: {self.last_file_size}")
+            return True
+            
+        except Exception as e:
+            print(f"⚠️ Error checking file changes: {e}")
+            return False
     
     def load_processed_links(self):
         """Load already processed links from media.json to avoid re-downloading"""
@@ -66,7 +123,7 @@ class LinkDownloadManager:
             
             links = []
             link_patterns = [
-                r'https://drive\.google\.com/file/d/[^/\s]+',
+                r'https://drive\.google\.com/file/d/[^/\s]+[^\s]*',
                 r'https://drive\.google\.com/open\?id=[^\s]+',
                 r'https://we\.tl/t-[^\s]+',
                 r'https://wetransfer\.com/downloads/[^\s]+'
@@ -79,8 +136,11 @@ class LinkDownloadManager:
                     for pattern in link_patterns:
                         matches = re.findall(pattern, body)
                         for match in matches:
+                            # Clean up the URL (remove any trailing characters)
+                            clean_url = match.rstrip('.,;!?)')
+                            
                             link_info = {
-                                'url': match,
+                                'url': clean_url,
                                 'message_id': message['id'],
                                 'author': message['author'],
                                 'timestamp': message['timestamp'],
@@ -88,7 +148,7 @@ class LinkDownloadManager:
                             }
                             links.append(link_info)
             
-            print(f"🔍 Found {len(links)} links in messages")
+            print(f"🔍 Found {len(links)} total links in messages")
             return links
             
         except Exception as e:
@@ -121,7 +181,7 @@ class LinkDownloadManager:
                 file_path = Path(file_path)
                 if file_path.exists():
                     # Generate a unique ID for this media entry
-                    media_id = f"auto_{int(time.time())}_{file_path.stem}"
+                    media_id = f"auto_{int(time.time())}_{file_path.stem}_{len(media_data)}"
                     
                     # Get file info
                     file_size = file_path.stat().st_size
@@ -141,8 +201,8 @@ class LinkDownloadManager:
                     media_entry = {
                         "id": media_id,
                         "author": link_info['author'],
-                        "timestamp": int(time.time()),  # Current timestamp for download time
-                        "original_timestamp": link_info['timestamp'],  # Original message timestamp
+                        "timestamp": int(time.time()),
+                        "original_timestamp": link_info['timestamp'],
                         "caption": f"Auto-downloaded from: {link_info['url'][:50]}...",
                         "type": media_type,
                         "mediaPath": str(file_path.relative_to(Path.cwd())),
@@ -180,66 +240,97 @@ class LinkDownloadManager:
         print(f"👤 Author: {link_info['author']}")
         print(f"📅 Message time: {datetime.fromtimestamp(link_info['timestamp'])}")
         
-        # Get files before download
-        files_before = set(f.name for f in self.download_dir.iterdir() if f.is_file())
+        # Create a new downloader instance for this download
+        downloader = SeleniumVideoDownloader(download_dir=str(self.download_dir), headless=True)
         
-        # Attempt download
-        success = self.downloader.download(url)
-        
-        if success:
-            # Get files after download
-            files_after = set(f.name for f in self.download_dir.iterdir() if f.is_file())
-            new_files = files_after - files_before
+        try:
+            # Get files before download
+            files_before = set(f.name for f in self.download_dir.iterdir() if f.is_file())
             
-            if new_files:
-                downloaded_files = [self.download_dir / filename for filename in new_files]
-                print(f"✅ Downloaded {len(new_files)} file(s): {list(new_files)}")
+            # Attempt download
+            success = downloader.download(url)
+            
+            if success:
+                # Get files after download
+                files_after = set(f.name for f in self.download_dir.iterdir() if f.is_file())
+                new_files = files_after - files_before
                 
-                # Update media.json
-                self.update_media_json(link_info, downloaded_files)
-                return True
+                if new_files:
+                    downloaded_files = [self.download_dir / filename for filename in new_files]
+                    print(f"✅ Downloaded {len(new_files)} file(s): {list(new_files)}")
+                    
+                    # Update media.json
+                    self.update_media_json(link_info, downloaded_files)
+                    return True
+                else:
+                    print("⚠️ Download reported success but no new files found")
+                    # Still mark as processed to avoid infinite retries
+                    self.mark_link_processed(url)
+                    return False
             else:
-                print("⚠️ Download reported success but no new files found")
-                # Still mark as processed to avoid infinite retries
-                self.mark_link_processed(url)
+                print(f"❌ Failed to download: {url}")
                 return False
-        else:
-            print(f"❌ Failed to download: {url}")
-            return False
+                
+        finally:
+            # Always clean up the downloader
+            downloader.cleanup()
     
-    def process_new_links(self):
+    def process_new_links(self, force=False):
         """Process all new links found in messages.json"""
-        links = self.extract_links_from_messages()
-        
-        if not links:
-            print("ℹ️ No links found in messages")
-            return
-        
-        new_links = [link for link in links if not self.is_link_processed(link['url'])]
-        
-        if not new_links:
-            print("ℹ️ No new links to process")
-            return
-        
-        print(f"🆕 Found {len(new_links)} new links to download")
-        
-        for i, link_info in enumerate(new_links, 1):
-            print(f"\n📥 Processing link {i}/{len(new_links)}")
-            print("-" * 50)
+        with self.processing_lock:
+            if self.is_processing and not force:
+                print("⏳ Already processing links, skipping...")
+                return
             
-            try:
-                self.download_link(link_info)
-                # Small delay between downloads
-                time.sleep(2)
-            except Exception as e:
-                print(f"❌ Error processing link {link_info['url']}: {e}")
-                continue
-        
-        print(f"\n✅ Finished processing {len(new_links)} links")
+            self.is_processing = True
+            
+        try:
+            print(f"🔄 Processing links... (Force: {force})")
+            
+            # Check if file has actually changed (unless forced)
+            if not force and not self.has_file_changed():
+                print("ℹ️ No changes detected in messages.json")
+                return
+            
+            links = self.extract_links_from_messages()
+            
+            if not links:
+                print("ℹ️ No links found in messages")
+                self.update_file_state()
+                return
+            
+            new_links = [link for link in links if not self.is_link_processed(link['url'])]
+            
+            if not new_links:
+                print("ℹ️ No new links to process")
+                self.update_file_state()
+                return
+            
+            print(f"🆕 Found {len(new_links)} new links to download")
+            
+            for i, link_info in enumerate(new_links, 1):
+                print(f"\n📥 Processing link {i}/{len(new_links)}")
+                print("-" * 50)
+                
+                try:
+                    self.download_link(link_info)
+                    # Small delay between downloads
+                    time.sleep(2)
+                except Exception as e:
+                    print(f"❌ Error processing link {link_info['url']}: {e}")
+                    continue
+            
+            print(f"\n✅ Finished processing {len(new_links)} links")
+            
+            # Update file state after successful processing
+            self.update_file_state()
+            
+        finally:
+            self.is_processing = False
     
     def cleanup(self):
         """Clean up resources"""
-        if hasattr(self, 'downloader'):
+        if hasattr(self, 'downloader') and self.downloader:
             self.downloader.cleanup()
 
 
@@ -555,45 +646,87 @@ class SeleniumVideoDownloader:
     def cleanup(self):
         """Clean up and close browser"""
         if self.driver:
-            self.driver.quit()
+            try:
+                self.driver.quit()
+                print("🧹 Browser closed")
+            except:
+                pass
 
 
 class MessagesFileHandler(FileSystemEventHandler):
     """Handle file system events for messages.json"""
     def __init__(self, download_manager):
         self.download_manager = download_manager
-        self.last_modified = 0
+        self.last_event_time = 0
         
     def on_modified(self, event):
         if event.is_directory:
             return
             
-        if event.src_path.endswith('messages.json'):
-            # Avoid processing the same modification multiple times
-            current_time = time.time()
-            if current_time - self.last_modified < 2:  # 2 second cooldown
-                return
-                
-            self.last_modified = current_time
-            print(f"\n📄 messages.json modified, checking for new links...")
-            time.sleep(1)  # Give time for file to be fully written
+        # Check if it's the messages.json file
+        event_path = Path(event.src_path).resolve()
+        if event_path != self.download_manager.messages_file:
+            return
             
+        # Debounce events (avoid multiple triggers)
+        current_time = time.time()
+        if current_time - self.last_event_time < 3:  # 3 second cooldown
+            return
+            
+        self.last_event_time = current_time
+        
+        print(f"\n📄 messages.json modified at {datetime.now().strftime('%H:%M:%S')}")
+        
+        # Add delay to ensure file is fully written
+        time.sleep(2)
+        
+        try:
+            self.download_manager.process_new_links()
+        except Exception as e:
+            print(f"❌ Error processing new links: {e}")
+
+
+class PollingMonitor:
+    """Alternative polling-based monitor for systems where file watching doesn't work well"""
+    def __init__(self, download_manager, poll_interval=5):
+        self.download_manager = download_manager
+        self.poll_interval = poll_interval
+        self.running = False
+        self.thread = None
+    
+    def start(self):
+        """Start polling"""
+        self.running = True
+        self.thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self.thread.start()
+        print(f"🔄 Started polling every {self.poll_interval} seconds")
+    
+    def stop(self):
+        """Stop polling"""
+        self.running = False
+        if self.thread:
+            self.thread.join()
+    
+    def _poll_loop(self):
+        """Main polling loop"""
+        while self.running:
             try:
                 self.download_manager.process_new_links()
+                time.sleep(self.poll_interval)
             except Exception as e:
-                print(f"❌ Error processing new links: {e}")
+                print(f"❌ Polling error: {e}")
+                time.sleep(self.poll_interval)
 
 
 def main():
     """Main function to run the automated link downloader"""
-    print("🤖 Automated Link Downloader - Monitoring Mode")
+    print("🤖 Automated Link Downloader - Enhanced Monitoring")
     print("=" * 60)
     print("Features:")
-    print("✅ Monitors messages.json for new Google Drive/WeTransfer links")
-    print("✅ Automatically downloads videos from detected links")
-    print("✅ Updates media.json with download information")
-    print("✅ Prevents duplicate downloads")
-    print("✅ Runs in background monitoring mode")
+    print("✅ Smart file change detection")
+    print("✅ Thread-safe processing")
+    print("✅ Fallback polling mode")
+    print("✅ Improved conflict resolution")
     print("=" * 60)
     
     # Initialize the download manager
@@ -601,27 +734,54 @@ def main():
     
     # Process any existing links first
     print("🔍 Processing existing links...")
-    download_manager.process_new_links()
+    download_manager.process_new_links(force=True)
     
-    # Setup file monitoring
-    print("\n👀 Starting file monitoring...")
-    event_handler = MessagesFileHandler(download_manager)
-    observer = Observer()
-    observer.schedule(event_handler, path='.', recursive=False)
-    observer.start()
+    # Ask user for monitoring method
+    use_polling = input("\nUse polling mode instead of file watching? (y/n, default: n): ").strip().lower()
     
-    print("🟢 Monitoring started! Watching for changes to messages.json...")
-    print("Press Ctrl+C to stop monitoring")
+    if use_polling in ['y', 'yes', '1', 'true']:
+        # Use polling mode
+        print("\n🔄 Starting polling mode...")
+        poll_interval = 10  # Check every 10 seconds
+        monitor = PollingMonitor(download_manager, poll_interval)
+        monitor.start()
+        
+        print(f"🟢 Polling every {poll_interval} seconds. Press Ctrl+C to stop.")
+        
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n🛑 Stopping polling...")
+            monitor.stop()
+    else:
+        # Use file watching mode
+        print("\n👀 Starting file watching mode...")
+        event_handler = MessagesFileHandler(download_manager)
+        observer = Observer()
+        
+        # Watch the directory containing messages.json
+        watch_path = download_manager.messages_file.parent
+        observer.schedule(event_handler, path=str(watch_path), recursive=False)
+        observer.start()
+        
+        print(f"🟢 Watching {watch_path} for changes. Press Ctrl+C to stop.")
+        
+        # Also start a background polling as backup
+        backup_monitor = PollingMonitor(download_manager, 30)  # Check every 30 seconds as backup
+        backup_monitor.start()
+        
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n🛑 Stopping monitoring...")
+            observer.stop()
+            backup_monitor.stop()
+        
+        observer.join()
     
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n🛑 Stopping monitoring...")
-        observer.stop()
-        download_manager.cleanup()
-    
-    observer.join()
+    download_manager.cleanup()
     print("👋 Goodbye!")
 
 
@@ -633,15 +793,109 @@ def run_once():
     download_manager = LinkDownloadManager()
     
     try:
-        download_manager.process_new_links()
+        download_manager.process_new_links(force=True)
     finally:
         download_manager.cleanup()
+
+
+def test_file_monitoring():
+    """Test if file monitoring is working properly"""
+    print("🧪 Testing File Monitoring")
+    print("=" * 30)
+    
+    messages_file = Path("rss/messages.json")
+    if not messages_file.exists():
+        print("❌ messages.json not found")
+        return
+    
+    print(f"📄 Monitoring: {messages_file.absolute()}")
+    
+    class TestHandler(FileSystemEventHandler):
+        def __init__(self):
+            self.events = []
+        
+        def on_modified(self, event):
+            if not event.is_directory:
+                event_path = Path(event.src_path).resolve()
+                self.events.append((time.time(), event_path))
+                print(f"🔔 File modified: {event_path}")
+    
+    handler = TestHandler()
+    observer = Observer()
+    observer.schedule(handler, path=str(messages_file.parent), recursive=False)
+    observer.start()
+    
+    print("✅ File monitoring started")
+    print("💡 Try modifying messages.json in another program")
+    print("💡 Press Ctrl+C to stop test")
+    
+    try:
+        start_time = time.time()
+        while time.time() - start_time < 60:  # Run for 1 minute
+            time.sleep(1)
+            if len(handler.events) > 0:
+                print(f"✅ Detected {len(handler.events)} file events")
+                for event_time, path in handler.events[-3:]:  # Show last 3 events
+                    print(f"   {datetime.fromtimestamp(event_time).strftime('%H:%M:%S')} - {path.name}")
+    except KeyboardInterrupt:
+        pass
+    
+    observer.stop()
+    observer.join()
+    
+    if len(handler.events) == 0:
+        print("⚠️ No file events detected. Consider using polling mode.")
+    else:
+        print(f"✅ File monitoring working! Detected {len(handler.events)} events")
+
+
+def debug_messages_file():
+    """Debug the messages.json file to check for links"""
+    print("🔍 Debugging messages.json")
+    print("=" * 30)
+    
+    manager = LinkDownloadManager()
+    
+    print(f"📄 File path: {manager.messages_file}")
+    print(f"📄 File exists: {manager.messages_file.exists()}")
+    
+    if manager.messages_file.exists():
+        stat = manager.messages_file.stat()
+        print(f"📊 File size: {stat.st_size} bytes")
+        print(f"📊 Last modified: {datetime.fromtimestamp(stat.st_mtime)}")
+        
+        # Extract and show links
+        links = manager.extract_links_from_messages()
+        print(f"\n🔗 Found {len(links)} links:")
+        
+        for i, link in enumerate(links[:5], 1):  # Show first 5 links
+            processed = manager.is_link_processed(link['url'])
+            status = "✅ Processed" if processed else "🆕 New"
+            print(f"  {i}. {status} - {link['url'][:60]}...")
+            print(f"     Author: {link['author']}, Time: {datetime.fromtimestamp(link['timestamp'])}")
+        
+        if len(links) > 5:
+            print(f"     ... and {len(links) - 5} more")
+        
+        # Show processed links
+        print(f"\n📚 Previously processed: {len(manager.processed_links)} links")
 
 
 if __name__ == "__main__":
     import sys
     
-    if len(sys.argv) > 1 and sys.argv[1] == '--once':
-        run_once()
+    if len(sys.argv) > 1:
+        if sys.argv[1] == '--once':
+            run_once()
+        elif sys.argv[1] == '--test':
+            test_file_monitoring()
+        elif sys.argv[1] == '--debug':
+            debug_messages_file()
+        else:
+            print("Usage:")
+            print("  python script.py           # Run with monitoring")
+            print("  python script.py --once    # Process links once and exit")
+            print("  python script.py --test    # Test file monitoring")
+            print("  python script.py --debug   # Debug messages.json")
     else:
         main()
