@@ -37,23 +37,104 @@ class FileUtils {
     }
   }
 
+  static groupMessagesByTimestamp(messages) {
+    // Sort messages by timestamp
+    const sortedMessages = messages.sort((a, b) => a.timestamp - b.timestamp);
+    
+    const groupedMessages = [];
+    let currentGroup = null;
+    
+    for (const msg of sortedMessages) {
+      // Extract group ID from the message ID (before @g.us)
+      const groupId = msg.id.split('@g.us')[0];
+      
+      // Check if we should start a new group
+      const shouldStartNewGroup = !currentGroup || 
+        currentGroup.author !== msg.author ||
+        currentGroup.groupId !== groupId ||
+        (msg.timestamp - currentGroup.startTimestamp) > 300; // 5 minutes = 300 seconds
+      
+      if (shouldStartNewGroup) {
+        // Create a new group
+        currentGroup = {
+          id: msg.id,
+          author: msg.author,
+          groupId: groupId,
+          startTimestamp: msg.timestamp,
+          endTimestamp: msg.timestamp,
+          messages: [],
+          media: [],
+          texts: []
+        };
+        groupedMessages.push(currentGroup);
+      }
+      
+      // Update the end timestamp
+      currentGroup.endTimestamp = msg.timestamp;
+      
+      // Add message to the current group
+      currentGroup.messages.push({
+        id: msg.id,
+        timestamp: msg.timestamp,
+        type: msg.type,
+        caption: msg.caption || msg.body || '',
+        mediaPath: msg.mediaPath
+      });
+      
+      // Organize by type
+      if (msg.hasMedia && msg.mediaPath) {
+        currentGroup.media.push({
+          type: msg.type,
+          mediaPath: msg.mediaPath,
+          caption: msg.caption || msg.body || '',
+          timestamp: msg.timestamp
+        });
+      } else if (msg.body && !msg.hasMedia) {
+        currentGroup.texts.push({
+          text: msg.body,
+          timestamp: msg.timestamp
+        });
+      }
+    }
+    
+    // Format the grouped messages for JSON output
+    return groupedMessages.map(group => ({
+      id: `${group.groupId}_${group.author}_${group.startTimestamp}`,
+      author: group.author,
+      groupId: group.groupId,
+      startTimestamp: group.startTimestamp,
+      endTimestamp: group.endTimestamp,
+      duration: group.endTimestamp - group.startTimestamp,
+      messageCount: group.messages.length,
+      media: group.media,
+      texts: group.texts,
+      allMessages: group.messages
+    }));
+  }
+
   static updateMediaIndex(messageHistory) {
-    const mediaItems = messageHistory
-      .filter(msg => msg.hasMedia && msg.mediaPath)
+    // Filter messages (including text messages without media)
+    const relevantMessages = messageHistory
+      .filter(msg => msg.hasMedia || (msg.body && msg.body.trim() !== ''))
       .map(msg => ({
         id: msg.id,
         author: msg.author,
         timestamp: msg.timestamp,
         caption: msg.body || '',
-        type: msg.type,
-        mediaPath: msg.mediaPath,
+        type: msg.type || 'text',
+        mediaPath: msg.mediaPath || null,
+        hasMedia: msg.hasMedia || false,
+        body: msg.body || ''
       }));
 
-    if (mediaItems.length === 0) return;
+    if (relevantMessages.length === 0) return;
 
-    const success = this.saveJSON('./media/media.json', mediaItems);
+    // Group messages by the 5-minute rule
+    const groupedMessages = this.groupMessagesByTimestamp(relevantMessages);
+
+    const success = this.saveJSON('./media/media.json', groupedMessages);
     if (success) {
-      console.log(`📦 media.json updated with ${mediaItems.length} items`);
+      console.log(`📦 media.json updated with ${groupedMessages.length} grouped entries from ${relevantMessages.length} messages`);
     }
   }
 }
