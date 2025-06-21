@@ -16,11 +16,25 @@ const config = {
   },
   
   whatsapp: {
-    puppeteer: {
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    }
-  },
+  puppeteer: {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
+      '--disable-gpu',
+      '--disable-web-security',
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--shm-size=3gb' // Increase shared memory size for video handling
+    ],
+    defaultViewport: null,
+    timeout: 60000 // Increase timeout
+  }
+},
   
   rss: {
     title: 'WhatsApp Monitor Feed',

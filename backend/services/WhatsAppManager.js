@@ -95,53 +95,137 @@ class WhatsAppManager {
   }
 
   async handleIncomingMessage(message) {
-    console.log('Received message:', message.body);
-    
-    if (!this.selectedGroup || !message.from.includes('@g.us')) return;
-    if (message.from !== this.selectedGroup.id) return;
-    if (this.selectedUser && message.author !== this.selectedUser) return;
-    
-    let mediaPath = null;
+  console.log('Received message:', message.body || `[${message.type}]`);
+  
+  if (!this.selectedGroup || !message.from.includes('@g.us')) return;
+  if (message.from !== this.selectedGroup.id) return;
+  if (this.selectedUser && message.author !== this.selectedUser) return;
+  
+  let mediaPath = null;
 
-    // Handle media download
-    if (message.hasMedia) {
-      console.log(`📦 Message has media. Type: ${message.type}, From: ${message.author}`);
-      mediaPath = await this.downloadMedia(message);
-    }
-
-    const messageData = MessageUtils.createMessageData(message, mediaPath);
-    this.messageHistory.push(messageData);
+  // Handle media download with special handling for videos
+  if (message.hasMedia) {
+    console.log(`📦 Message has media. Type: ${message.type}, From: ${message.author}`);
     
-    // Group messages and update RSS
-    const grouped = MessageUtils.groupMessages([messageData]);
-    if (grouped.length > 0) {
-      this.rssManager.updateFeed(grouped[0], this.messageHistory);
-      this.io.emit('new_message', grouped[0]);
+    // For videos, we might want to handle them differently
+    if (message.type === 'video') {
+      console.log('🎥 Processing video message...');
+      // You could implement a queue system for videos or handle them asynchronously
     }
-    FileUtils.updateMediaIndex(this.messageHistory);
+    
+    mediaPath = await this.downloadMedia(message);
+    
+    // If video download failed, we still want to record the message
+    if (!mediaPath && message.type === 'video') {
+      console.log('📝 Recording video message without media file');
+    }
   }
+
+  const messageData = MessageUtils.createMessageData(message, mediaPath);
+  this.messageHistory.push(messageData);
+  
+  // Group messages and update RSS
+  const grouped = MessageUtils.groupMessages([messageData]);
+  if (grouped.length > 0) {
+    this.rssManager.updateFeed(grouped[0], this.messageHistory);
+    this.io.emit('new_message', grouped[0]);
+  }
+  FileUtils.updateMediaIndex(this.messageHistory);
+}
 
   async downloadMedia(message) {
-    try {
-      const media = await message.downloadMedia();
-
-      if (!media || !media.data) {
-        console.warn('⚠️ Media download failed');
-        return null;
+  try {
+    console.log(`🎬 Starting media download for message ${message.id.id}`);
+    console.log(`📊 Media info - Type: ${message.type}, Has Media: ${message.hasMedia}`);
+    
+    // Add retry logic for video downloads
+    let media = null;
+    let attempts = 0;
+    const maxAttempts = 3;
+    
+    while (attempts < maxAttempts && !media) {
+      try {
+        attempts++;
+        console.log(`📥 Download attempt ${attempts}/${maxAttempts}...`);
+        
+        // For videos, we might need to wait a bit before downloading
+        if (message.type === 'video' && attempts > 1) {
+          console.log('⏳ Waiting before retry...');
+          await new Promise(resolve => setTimeout(resolve, 2000 * attempts));
+        }
+        
+        // Download with timeout
+        const downloadPromise = message.downloadMedia();
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Download timeout')), 60000) // 60 second timeout
+        );
+        
+        media = await Promise.race([downloadPromise, timeoutPromise]);
+        
+      } catch (downloadError) {
+        console.warn(`⚠️ Download attempt ${attempts} failed:`, downloadError.message);
+        if (attempts === maxAttempts) {
+          throw downloadError;
+        }
       }
+    }
 
-      console.log('✅ Media object received:', {
-        mimetype: media.mimetype,
-        filename: media.filename,
-        size: media.data.length
-      });
-
-      return FileUtils.saveMedia(media, message.id.id);
-    } catch (err) {
-      console.error('❌ Error while downloading media:', err);
+    if (!media) {
+      console.error('❌ Media download failed - no media object returned');
       return null;
     }
+
+    // Check if media data exists
+    if (!media.data) {
+      console.error('❌ Media download failed - no data in media object');
+      console.log('📋 Media object details:', {
+        hasData: !!media.data,
+        mimetype: media.mimetype,
+        filename: media.filename,
+        mediaKeys: Object.keys(media)
+      });
+      return null;
+    }
+
+    console.log('✅ Media object received:', {
+      mimetype: media.mimetype,
+      filename: media.filename,
+      size: media.data.length,
+      dataType: typeof media.data
+    });
+
+    // For videos, check if the data is valid
+    if (message.type === 'video') {
+      // Videos should have substantial size
+      if (media.data.length < 1000) {
+        console.warn('⚠️ Video data seems too small, might be corrupted');
+        return null;
+      }
+      
+      // Log first few bytes to verify it's video data
+      const header = media.data.substring(0, 20);
+      console.log('🔍 Video data header:', header);
+    }
+
+    return FileUtils.saveMedia(media, message.id.id);
+    
+  } catch (err) {
+    console.error('❌ Error while downloading media:', err);
+    console.error('📋 Error details:', {
+      name: err.name,
+      message: err.message,
+      stack: err.stack?.split('\n').slice(0, 3).join('\n')
+    });
+    
+    // For videos that fail to download, you might want to save the message info
+    if (message.type === 'video') {
+      console.log('💡 Video download failed. Consider implementing fallback strategy.');
+      // You could save a placeholder or the video URL if available
+    }
+    
+    return null;
   }
+}
 
   async getGroups() {
     if (!this.isAuthenticated || !this.client) {
