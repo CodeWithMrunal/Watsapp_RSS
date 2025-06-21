@@ -18,7 +18,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 class LinkDownloadManager:
-    def __init__(self, messages_file="rss/messages.json", media_file="media/media.json", download_dir="media"):
+    def __init__(self, messages_file="rss/messages.json", media_file="media/links.json", download_dir="media"):
         self.messages_file = Path(messages_file).resolve()
         self.media_file = Path(media_file).resolve()
         self.download_dir = Path(download_dir)
@@ -94,7 +94,7 @@ class LinkDownloadManager:
             return False
     
     def load_processed_links(self):
-        """Load already processed links from media.json to avoid re-downloading"""
+        """Load already processed links from links.json to avoid re-downloading"""
         try:
             if self.media_file.exists():
                 with open(self.media_file, 'r', encoding='utf-8') as f:
@@ -167,7 +167,7 @@ class LinkDownloadManager:
             self.link_to_media_map[link_hash] = media_info
     
     def update_media_json(self, link_info, downloaded_files):
-        """Update media.json with new download information"""
+        """Update links.json with new download information"""
         try:
             # Load existing media data
             media_data = []
@@ -218,14 +218,14 @@ class LinkDownloadManager:
                     # Mark this link as processed
                     self.mark_link_processed(link_info['url'], media_entry)
             
-            # Save updated media.json
+            # Save updated links.json
             with open(self.media_file, 'w', encoding='utf-8') as f:
                 json.dump(media_data, f, indent=2, ensure_ascii=False)
             
             print(f"📄 Updated {self.media_file} with {len(downloaded_files)} new entries")
             
         except Exception as e:
-            print(f"❌ Error updating media.json: {e}")
+            print(f"❌ Error updating links.json: {e}")
     
     def download_link(self, link_info):
         """Download a single link using the Selenium downloader"""
@@ -258,7 +258,7 @@ class LinkDownloadManager:
                     downloaded_files = [self.download_dir / filename for filename in new_files]
                     print(f"✅ Downloaded {len(new_files)} file(s): {list(new_files)}")
                     
-                    # Update media.json
+                    # Update links.json
                     self.update_media_json(link_info, downloaded_files)
                     return True
                 else:
