@@ -385,8 +385,9 @@ class SeleniumVideoDownloader:
             print("💡 Make sure you have Chrome and chromedriver installed")
             return False
     
+    # Also update the wait_for_download_completion method to better handle Google Drive downloads
     def wait_for_download_completion(self, timeout=300):
-        """Wait for download to complete - Enhanced for small files"""
+        """Wait for download to complete - Enhanced for Google Drive"""
         print("⏳ Waiting for download to complete...")
         start_time = time.time()
         
@@ -404,28 +405,48 @@ class SeleniumVideoDownloader:
         
         print(f"📊 Initial files in directory: {len(initial_files)}")
         
-        # For very small files, use shorter intervals and timeouts
-        check_interval = 0.2  # Check every 200ms for faster detection
+        # Check Chrome's download status through JavaScript
+        check_interval = 1  # Check every second
         last_check_time = start_time
-        min_wait_time = 2  # Minimum wait time before giving up
-        
-        # Quick initial check (small files might download immediately)
-        time.sleep(0.5)
+        download_detected = False
         
         while time.time() - start_time < timeout:
             try:
                 current_time = time.time()
                 
+                # Check Chrome downloads using JavaScript
+                try:
+                    # This JavaScript checks if there are any active downloads
+                    downloads_active = self.driver.execute_script("""
+                        var items = document.querySelector('downloads-manager');
+                        if (items && items.shadowRoot) {
+                            var downloads = items.shadowRoot.querySelectorAll('downloads-item');
+                            return downloads.length > 0;
+                        }
+                        return false;
+                    """)
+                    
+                    if downloads_active:
+                        download_detected = True
+                        print("📥 Active download detected in Chrome")
+                except:
+                    # If we can't check Chrome downloads, continue with file system check
+                    pass
+                
                 # Check for .crdownload files (Chrome partial downloads)
                 crdownload_files = list(self.download_dir.glob("*.crdownload"))
                 if crdownload_files:
-                    print(f"📥 Download in progress: {crdownload_files[0].name}")
-                    time.sleep(1)
+                    download_detected = True
+                    file_size = crdownload_files[0].stat().st_size
+                    file_size_mb = file_size / (1024 * 1024)
+                    print(f"📥 Download in progress: {crdownload_files[0].name} ({file_size_mb:.1f} MB)")
+                    time.sleep(2)
                     continue
                 
-                # Check for .tmp files (temporary downloads)
+                # Check for .tmp files
                 tmp_files = list(self.download_dir.glob("*.tmp"))
                 if tmp_files:
+                    download_detected = True
                     print(f"📥 Temporary file detected: {tmp_files[0].name}")
                     time.sleep(1)
                     continue
@@ -435,7 +456,7 @@ class SeleniumVideoDownloader:
                 current_sizes = {}
                 
                 for f in self.download_dir.iterdir():
-                    if f.is_file() and not f.name.startswith('.'):  # Skip hidden files
+                    if f.is_file() and not f.name.startswith('.'):
                         current_files.add(f.name)
                         current_sizes[f.name] = f.stat().st_size
                 
@@ -446,82 +467,65 @@ class SeleniumVideoDownloader:
                     print(f"✅ Download completed!")
                     for filename in new_files:
                         file_size = current_sizes.get(filename, 0)
-                        file_size_kb = file_size / 1024
-                        if file_size < 1024:
-                            print(f"📁 Downloaded: {filename} ({file_size} bytes)")
-                        elif file_size < 1024 * 1024:
-                            print(f"📁 Downloaded: {filename} ({file_size_kb:.1f} KB)")
-                        else:
-                            file_size_mb = file_size / (1024 * 1024)
-                            print(f"📁 Downloaded: {filename} ({file_size_mb:.1f} MB)")
+                        file_size_mb = file_size / (1024 * 1024)
+                        print(f"📁 Downloaded: {filename} ({file_size_mb:.1f} MB)")
                     return True
                 
-                # Check for files that have grown in size (ongoing downloads)
+                # Check for files that have grown
                 for filename in current_files & initial_files:
                     old_size = initial_sizes.get(filename, 0)
                     new_size = current_sizes.get(filename, 0)
                     if new_size > old_size:
-                        print(f"✅ Existing file updated: {filename} (grew by {new_size - old_size} bytes)")
-                        return True
+                        download_detected = True
+                        growth_mb = (new_size - old_size) / (1024 * 1024)
+                        print(f"📈 File growing: {filename} (+{growth_mb:.1f} MB)")
+                        initial_sizes[filename] = new_size  # Update size for next check
                 
-                # For small files, check if we've waited long enough
-                elapsed = current_time - start_time
-                if elapsed >= min_wait_time:
-                    # Do a final comprehensive check for any files that might have been missed
-                    final_files = set()
+                # If we haven't detected any download activity after 10 seconds, likely failed
+                if not download_detected and current_time - start_time > 10:
+                    print("⚠️ No download activity detected after 10 seconds")
+                    
+                    # Check if we're still on a Google page that might need interaction
                     try:
-                        for f in self.download_dir.iterdir():
-                            if f.is_file() and not f.name.startswith('.'):
-                                stat_info = f.stat()
-                                # Check if file was created/modified recently (within last 30 seconds)
-                                if current_time - stat_info.st_mtime < 30:
-                                    final_files.add(f.name)
-                        
-                        recent_new_files = final_files - initial_files
-                        if recent_new_files:
-                            print(f"✅ Found recently created files: {list(recent_new_files)}")
-                            for filename in recent_new_files:
-                                file_path = self.download_dir / filename
-                                if file_path.exists():
-                                    file_size = file_path.stat().st_size
-                                    print(f"📁 Recently downloaded: {filename} ({file_size} bytes)")
-                            return True
-                    except Exception as e:
-                        print(f"⚠️ Error in final file check: {e}")
+                        current_url = self.driver.current_url
+                        if 'drive.google.com' in current_url:
+                            print("🔍 Still on Google Drive page, checking for download options...")
+                            
+                            # Look for any download buttons or links we might have missed
+                            download_elements = self.driver.find_elements(By.XPATH, 
+                                "//a[contains(@href, 'export=download')] | //button[contains(text(), 'Download')]")
+                            
+                            if download_elements:
+                                print(f"🔘 Found {len(download_elements)} download elements, clicking first one...")
+                                download_elements[0].click()
+                                download_detected = True  # Give it more time
+                                time.sleep(3)
+                    except:
+                        pass
+                    
+                    if not download_detected:
+                        return False
                 
-                # Print status less frequently for small files
-                if current_time - last_check_time > 5:  # Every 5 seconds instead of 10
+                # Print status periodically
+                if current_time - last_check_time > 5:
                     elapsed = int(current_time - start_time)
-                    current_file_count = len(current_files)
-                    print(f"⏱️ Still waiting... ({elapsed}s elapsed, {current_file_count} files in directory)")
-                    
-                    # For debugging small files, show what files are currently there
-                    if elapsed > 10:  # After 10 seconds, show more details
-                        print(f"🔍 Current files: {list(current_files)[:3]}{'...' if len(current_files) > 3 else ''}")
-                    
+                    print(f"⏱️ Still waiting... ({elapsed}s elapsed, {len(current_files)} files in directory)")
                     last_check_time = current_time
                 
                 time.sleep(check_interval)
                 
             except Exception as e:
                 print(f"⚠️ Error during download check: {e}")
-                time.sleep(0.5)
+                time.sleep(1)
         
-        # Final timeout check - sometimes small files download but we miss them
-        print("⚠️ Download timeout reached, doing final check...")
-        try:
-            final_files = set(f.name for f in self.download_dir.iterdir() if f.is_file() and not f.name.startswith('.'))
-            final_new_files = final_files - initial_files
-            if final_new_files:
-                print(f"✅ Found files after timeout: {list(final_new_files)}")
-                for filename in final_new_files:
-                    file_path = self.download_dir / filename
-                    if file_path.exists():
-                        file_size = file_path.stat().st_size
-                        print(f"📁 Final check found: {filename} ({file_size} bytes)")
-                return True
-        except Exception as e:
-            print(f"⚠️ Error in final timeout check: {e}")
+        # Final check
+        print("⚠️ Download timeout reached")
+        final_files = set(f.name for f in self.download_dir.iterdir() if f.is_file())
+        final_new_files = final_files - initial_files
+        
+        if final_new_files:
+            print(f"✅ Found files after timeout: {list(final_new_files)}")
+            return True
         
         return False
 
@@ -569,8 +573,10 @@ class SeleniumVideoDownloader:
         print("❌ Could not handle virus warning page")
         return False
     
+    # Updated download_google_drive_selenium method for your SeleniumVideoDownloader class
+
     def download_google_drive_selenium(self, url):
-        """Download from Google Drive using Selenium"""
+        """Download from Google Drive using Selenium - Updated for current Google Drive"""
         try:
             if not self.driver:
                 if not self.setup_driver():
@@ -580,11 +586,13 @@ class SeleniumVideoDownloader:
             self.driver.get(url)
             time.sleep(5)
             
-            # Extract file ID
+            # Extract file ID from various URL formats
             file_id = None
             current_url = self.driver.current_url
             
-            if '/file/d/' in current_url:
+            if '/file/d/' in url:
+                file_id = url.split('/file/d/')[1].split('/')[0]
+            elif '/file/d/' in current_url:
                 file_id = current_url.split('/file/d/')[1].split('/')[0]
             elif 'id=' in current_url:
                 file_id = current_url.split('id=')[1].split('&')[0]
@@ -593,34 +601,125 @@ class SeleniumVideoDownloader:
                 print("❌ Could not extract file ID from URL")
                 return False
             
-            # Navigate to direct download URL
+            print(f"📄 File ID: {file_id}")
+            
+            # Method 1: Try the direct download URL first
             direct_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-            print(f"🔗 Navigating to direct download URL...")
+            print(f"🔗 Trying direct download URL...")
             self.driver.get(direct_url)
             time.sleep(5)
             
-            # Check the current page
+            # Check if we got a virus warning page
             page_source = self.driver.page_source.lower()
-            page_title = self.driver.title.lower()
-            
-            if 'virus scan warning' in page_title or 'virus' in page_source:
+            if 'virus scan warning' in page_source or 'can\'t scan this file for viruses' in page_source:
                 print("⚠️ Virus scan warning detected")
-                if self.handle_google_drive_virus_warning():
-                    print("✅ Virus warning handled, download should start")
-                    time.sleep(3)
-                    return self.wait_for_download_completion()
-                else:
-                    print("❌ Failed to handle virus warning")
-                    return False
-            else:
-                print("✅ No virus warning detected, checking for automatic download...")
-                time.sleep(3)
-                return self.wait_for_download_completion()
                 
+                # Enhanced virus warning handling
+                handled = False
+                
+                # Method 1: Look for the download anyway button/link
+                download_selectors = [
+                    # Common selectors for the download anyway button
+                    "a#uc-download-link",
+                    "a[id*='download-link']",
+                    "form[id='download-form'] button",
+                    "form[id='downloadForm'] button",
+                    "input[name='confirm']",
+                    "button[aria-label*='Download']",
+                    "a[href*='confirm=t']",
+                    "a[href*='confirm=no_antivirus']",
+                    "form[action*='confirm'] button",
+                    "form[method='post'] button[type='submit']",
+                    "#download-form input[type='submit']",
+                    ".uc-error-subcaption a",
+                    "noscript a[href*='confirm']"
+                ]
+                
+                for selector in download_selectors:
+                    try:
+                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                        for element in elements:
+                            if element.is_displayed():
+                                href = element.get_attribute('href')
+                                if href and 'confirm=' in href:
+                                    # If it's a link with confirm parameter, navigate to it
+                                    print(f"📎 Found download link: {href[:50]}...")
+                                    self.driver.get(href)
+                                    handled = True
+                                    break
+                                else:
+                                    # If it's a button, click it
+                                    try:
+                                        element.click()
+                                        handled = True
+                                        print("✅ Clicked download button")
+                                        break
+                                    except:
+                                        self.driver.execute_script("arguments[0].click();", element)
+                                        handled = True
+                                        print("✅ JavaScript clicked download button")
+                                        break
+                        if handled:
+                            break
+                    except Exception as e:
+                        continue
+                
+                # Method 2: Extract confirm parameter and build URL manually
+                if not handled:
+                    print("🔍 Extracting confirm parameter from page...")
+                    try:
+                        # Look for confirm parameter in the page
+                        import re
+                        confirm_match = re.search(r'confirm=([a-zA-Z0-9_-]+)', page_source)
+                        if confirm_match:
+                            confirm_code = confirm_match.group(1)
+                            confirm_url = f"https://drive.google.com/uc?export=download&confirm={confirm_code}&id={file_id}"
+                            print(f"🔗 Found confirm code, navigating to: {confirm_url[:70]}...")
+                            self.driver.get(confirm_url)
+                            handled = True
+                        else:
+                            # Try with confirm=t as fallback
+                            confirm_url = f"https://drive.google.com/uc?export=download&confirm=t&id={file_id}"
+                            print(f"🔗 Using fallback confirm URL...")
+                            self.driver.get(confirm_url)
+                            handled = True
+                    except Exception as e:
+                        print(f"❌ Error extracting confirm parameter: {e}")
+                
+                if handled:
+                    print("✅ Virus warning bypassed, download should start")
+                    time.sleep(3)
+                    
+                    # Check if download started
+                    if self.wait_for_download_completion(timeout=30):
+                        return True
+                    else:
+                        print("⚠️ Download didn't start after handling virus warning")
+                else:
+                    print("❌ Could not handle virus warning")
+            
+            # If no virus warning or after handling it, check for download
+            print("🔍 Checking for automatic download...")
+            
+            # Sometimes the download starts automatically
+            if self.wait_for_download_completion(timeout=30):
+                return True
+            
+            # Method 3: Try alternative download method using Google Drive API-like URL
+            print("🔄 Trying alternative download method...")
+            alt_url = f"https://drive.google.com/u/0/uc?export=download&id={file_id}"
+            self.driver.get(alt_url)
+            time.sleep(5)
+            
+            # Final attempt to wait for download
+            return self.wait_for_download_completion(timeout=30)
+            
         except Exception as e:
             print(f"❌ Error downloading with Selenium: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False
-    
+        
     def handle_wetransfer_flow(self):
         """Handle the complete WeTransfer download flow"""
         try:
@@ -713,7 +812,7 @@ class SeleniumVideoDownloader:
         except Exception as e:
             print(f"❌ Error in download: {e}")
             return False
-    
+        
     def cleanup(self):
         """Clean up and close browser"""
         if self.driver:
