@@ -9,15 +9,27 @@ function createApiRoutes(whatsappManager) {
     res.json(whatsappManager.getStatus());
   });
 
+  // UPDATED: Add ready state checking
   router.get('/groups', async (req, res) => {
     console.log('GET /api/groups');
-
+    
     try {
+      // Check if client is ready first
+      if (!whatsappManager.isClientReady()) {
+        return res.status(503).json({ 
+          error: 'WhatsApp client is still initializing. Please wait a moment and try again.',
+          status: whatsappManager.getStatus()
+        });
+      }
+      
       const groups = await whatsappManager.getGroups();
       res.json(groups);
     } catch (error) {
       console.error('Error fetching groups:', error);
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ 
+        error: error.message,
+        status: whatsappManager.getStatus()
+      });
     }
   });
 

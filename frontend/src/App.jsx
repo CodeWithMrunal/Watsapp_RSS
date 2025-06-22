@@ -13,6 +13,7 @@ const API_BASE = 'http://localhost:3001';
 function App() {
   const [socket, setSocket] = useState(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isReady, setIsReady] = useState(false); // ADD THIS
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [selectedUser, setSelectedUser] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -35,32 +36,51 @@ function App() {
       console.log('WhatsApp disconnected:', reason);
       setStatus('disconnected');
       setIsAuthenticated(false);
+      setIsReady(false); // ADD THIS
       setSelectedGroup(null);
       setSelectedUser(null);
       setMessages([]);
+    });
+
+    // ADD: Listen for ready event
+    newSocket.on('ready', () => {
+      console.log('WhatsApp client is ready!');
+      setIsReady(true);
+      setStatus('ready');
+      setError('');
     });
 
     newSocket.on('authenticated', () => {
       setIsAuthenticated(true);
       setStatus('authenticated');
       setError('');
+      // Don't set ready here, wait for ready event
     });
 
     newSocket.on('auth_failure', (msg) => {
       setError(`Authentication failed: ${msg}`);
       setIsAuthenticated(false);
+      setIsReady(false); // ADD THIS
     });
 
     newSocket.on('new_message', (messageGroup) => {
       setMessages(prev => [messageGroup, ...prev]);
     });
 
+    // UPDATE: Handle status with ready state
     newSocket.on('status', (statusData) => {
       setIsAuthenticated(statusData.authenticated);
+      setIsReady(statusData.ready || false); // ADD THIS
       if (statusData.selectedGroup) {
         setSelectedGroup({ name: statusData.selectedGroup });
       }
       setSelectedUser(statusData.selectedUser);
+    });
+
+    // ADD: Handle loading progress
+    newSocket.on('loading_progress', ({ percent, message }) => {
+      console.log(`Loading: ${percent}% - ${message}`);
+      // You could show this in UI if needed
     });
 
     // Check initial status
@@ -75,6 +95,7 @@ function App() {
     try {
       const response = await axios.get(`${API_BASE}/api/status`);
       setIsAuthenticated(response.data.authenticated);
+      setIsReady(response.data.ready || false); // ADD THIS
       if (response.data.selectedGroup) {
         setSelectedGroup({ name: response.data.selectedGroup });
       }
@@ -127,6 +148,7 @@ function App() {
       
       // Reset all state immediately
       setIsAuthenticated(false);
+      setIsReady(false); // ADD THIS
       setSelectedGroup(null);
       setSelectedUser(null);
       setMessages([]);
@@ -141,6 +163,7 @@ function App() {
       
       // Force reset state even if logout call fails
       setIsAuthenticated(false);
+      setIsReady(false); // ADD THIS
       setSelectedGroup(null);
       setSelectedUser(null);
       setMessages([]);
@@ -158,6 +181,8 @@ function App() {
         <GroupSelection 
           onGroupSelected={handleGroupSelected}
           onLogout={handleLogout}
+          isReady={isReady} // ADD THIS PROP
+          socket={socket} // ADD THIS PROP
         />
       );
     }
@@ -183,6 +208,22 @@ function App() {
     );
   };
 
+  // UPDATE: Get status text
+  const getStatusText = () => {
+    if (isReady) return 'WhatsApp Ready';
+    if (isAuthenticated) return 'Initializing...';
+    if (status === 'connected') return 'Server Connected';
+    return 'Disconnected';
+  };
+
+  // UPDATE: Get status color
+  const getStatusColor = () => {
+    if (isReady) return 'bg-success';
+    if (isAuthenticated) return 'bg-warning';
+    if (status === 'connected') return 'bg-info';
+    return 'bg-danger';
+  };
+
   return (
     <Container fluid className="app-container">
       <Row className="justify-content-center">
@@ -190,12 +231,8 @@ function App() {
           <div className="app-header text-center mb-4">
             <h1 className="display-4 text-primary">WhatsApp Monitor</h1>
             <div className="status-indicator">
-              <span className={`badge ${
-                status === 'authenticated' ? 'bg-success' : 
-                status === 'connected' ? 'bg-warning' : 'bg-danger'
-              }`}>
-                {status === 'authenticated' ? 'WhatsApp Connected' :
-                 status === 'connected' ? 'Server Connected' : 'Disconnected'}
+              <span className={`badge ${getStatusColor()}`}>
+                {getStatusText()}
               </span>
               {isAuthenticated && (
                 <Button

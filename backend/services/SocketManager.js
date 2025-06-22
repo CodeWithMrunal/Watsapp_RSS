@@ -12,6 +12,28 @@ class SocketManager {
       // Send current status to newly connected client
       socket.emit('status', this.whatsappManager.getStatus());
       
+      // NEW: Handle ready state checking
+      socket.on('check_ready', () => {
+        socket.emit('status', this.whatsappManager.getStatus());
+      });
+      
+      // NEW: Handle client requesting groups when ready
+      socket.on('request_groups', async () => {
+        try {
+          if (this.whatsappManager.isClientReady()) {
+            const groups = await this.whatsappManager.getGroups();
+            socket.emit('groups_list', groups);
+          } else {
+            socket.emit('not_ready', { 
+              message: 'WhatsApp client is still initializing',
+              status: this.whatsappManager.getStatus()
+            });
+          }
+        } catch (error) {
+          socket.emit('error', { message: error.message });
+        }
+      });
+      
       socket.on('disconnect', () => {
         console.log('Client disconnected:', socket.id);
       });

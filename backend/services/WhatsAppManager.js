@@ -12,9 +12,13 @@ class WhatsAppManager {
     this.io = io;
     this.rssManager = rssManager;
     this.isAuthenticated = false;
+    this.isReady = false; // Add separate ready flag
     this.selectedGroup = null;
     this.selectedUser = null;
     this.messageHistory = [];
+    this.groupsCache = null; // Cache groups to avoid refetching
+    this.groupsCacheTime = null;
+    this.CACHE_DURATION = 5 * 60 * 1000; // 5 minutes cache
   }
 
   // Enhanced initialize method to handle re-initialization
@@ -33,14 +37,35 @@ class WhatsAppManager {
 
     // Reset state
     this.isAuthenticated = false;
+    this.isReady = false;
     this.selectedGroup = null;
     this.selectedUser = null;
     this.messageHistory = [];
+    this.groupsCache = null;
+    this.groupsCacheTime = null;
 
-    // Create new client
+    // Create new client with optimized settings
     this.client = new Client({
       authStrategy: new LocalAuth(),
-      puppeteer: config.whatsapp.puppeteer
+      puppeteer: {
+        ...config.whatsapp.puppeteer,
+        args: [
+          ...(config.whatsapp.puppeteer.args || []),
+          '--disable-gpu',
+          '--disable-dev-shm-usage',
+          '--disable-setuid-sandbox',
+          '--no-first-run',
+          '--no-sandbox',
+          '--no-zygote',
+          '--single-process',
+          '--disable-accelerated-2d-canvas',
+          '--disable-web-security'
+        ]
+      },
+      // Optimize client settings
+      takeoverOnConflict: false,
+      takeoverTimeoutMs: 0,
+      qrMaxRetries: 5
     });
 
     this.setupEventHandlers();
@@ -52,7 +77,7 @@ class WhatsAppManager {
 
   setupEventHandlers() {
     this.client.on('qr', (qr) => {
-      console.log('Received QR event');
+      console.log('📱 QR Code received');
       qrcode.toDataURL(qr, (err, url) => {
         if (err) {
           console.error('Error generating QR code:', err);
@@ -62,189 +87,266 @@ class WhatsAppManager {
       });
     });
 
-    this.client.on('ready', () => {
-      console.log('WhatsApp client is ready!');
+    // The ready event is the most reliable
+    this.client.on('ready', async () => {
+      console.log('✅ WhatsApp client is ready!');
       this.isAuthenticated = true;
+      this.isReady = true;
+      
+      // Pre-fetch groups in background
+      this.prefetchGroups();
+      
+      this.io.emit('ready');
       this.io.emit('authenticated');
     });
 
     this.client.on('authenticated', () => {
-      console.log('WhatsApp client authenticated');
+      console.log('🔐 WhatsApp client authenticated');
       this.isAuthenticated = true;
-      this.io.emit('authenticated');
+      // Don't emit authenticated here, wait for ready event
     });
 
     this.client.on('auth_failure', (msg) => {
-      console.error('Authentication failed:', msg);
+      console.error('❌ Authentication failed:', msg);
       this.isAuthenticated = false;
+      this.isReady = false;
       this.io.emit('auth_failure', msg);
     });
 
     this.client.on('disconnected', (reason) => {
-      console.log('WhatsApp client disconnected:', reason);
+      console.log('🔌 WhatsApp client disconnected:', reason);
       this.isAuthenticated = false;
+      this.isReady = false;
       this.selectedGroup = null;
       this.selectedUser = null;
       this.messageHistory = [];
+      this.groupsCache = null;
       this.io.emit('disconnected', reason);
     });
 
     this.client.on('message', async (message) => {
       await this.handleIncomingMessage(message);
     });
-  }
 
-  async handleIncomingMessage(message) {
-  console.log('Received message:', message.body || `[${message.type}]`);
-  
-  if (!this.selectedGroup || !message.from.includes('@g.us')) return;
-  if (message.from !== this.selectedGroup.id) return;
-  if (this.selectedUser && message.author !== this.selectedUser) return;
-  
-  let mediaPath = null;
-
-  // Handle media download with special handling for videos
-  if (message.hasMedia) {
-    console.log(`📦 Message has media. Type: ${message.type}, From: ${message.author}`);
-    
-    // For videos, we might want to handle them differently
-    if (message.type === 'video') {
-      console.log('🎥 Processing video message...');
-      // You could implement a queue system for videos or handle them asynchronously
-    }
-    
-    mediaPath = await this.downloadMedia(message);
-    
-    // If video download failed, we still want to record the message
-    if (!mediaPath && message.type === 'video') {
-      console.log('📝 Recording video message without media file');
-    }
-  }
-
-  const messageData = MessageUtils.createMessageData(message, mediaPath);
-  this.messageHistory.push(messageData);
-  
-  // Group messages and update RSS
-  const grouped = MessageUtils.groupMessages([messageData]);
-  if (grouped.length > 0) {
-    this.rssManager.updateFeed(grouped[0], this.messageHistory);
-    this.io.emit('new_message', grouped[0]);
-  }
-  FileUtils.updateMediaIndex(this.messageHistory);
-}
-
-  async downloadMedia(message) {
-  try {
-    console.log(`🎬 Starting media download for message ${message.id.id}`);
-    console.log(`📊 Media info - Type: ${message.type}, Has Media: ${message.hasMedia}`);
-    
-    // Add retry logic for video downloads
-    let media = null;
-    let attempts = 0;
-    const maxAttempts = 3;
-    
-    while (attempts < maxAttempts && !media) {
-      try {
-        attempts++;
-        console.log(`📥 Download attempt ${attempts}/${maxAttempts}...`);
-        
-        // For videos, we might need to wait a bit before downloading
-        if (message.type === 'video' && attempts > 1) {
-          console.log('⏳ Waiting before retry...');
-          await new Promise(resolve => setTimeout(resolve, 2000 * attempts));
-        }
-        
-        // Download with timeout
-        const downloadPromise = message.downloadMedia();
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Download timeout')), 60000) // 60 second timeout
-        );
-        
-        media = await Promise.race([downloadPromise, timeoutPromise]);
-        
-      } catch (downloadError) {
-        console.warn(`⚠️ Download attempt ${attempts} failed:`, downloadError.message);
-        if (attempts === maxAttempts) {
-          throw downloadError;
-        }
-      }
-    }
-
-    if (!media) {
-      console.error('❌ Media download failed - no media object returned');
-      return null;
-    }
-
-    // Check if media data exists
-    if (!media.data) {
-      console.error('❌ Media download failed - no data in media object');
-      console.log('📋 Media object details:', {
-        hasData: !!media.data,
-        mimetype: media.mimetype,
-        filename: media.filename,
-        mediaKeys: Object.keys(media)
-      });
-      return null;
-    }
-
-    console.log('✅ Media object received:', {
-      mimetype: media.mimetype,
-      filename: media.filename,
-      size: media.data.length,
-      dataType: typeof media.data
+    // Loading states
+    this.client.on('loading_screen', (percent, message) => {
+      console.log('⏳ Loading:', percent, message);
+      this.io.emit('loading_progress', { percent, message });
     });
-
-    // For videos, check if the data is valid
-    if (message.type === 'video') {
-      // Videos should have substantial size
-      if (media.data.length < 1000) {
-        console.warn('⚠️ Video data seems too small, might be corrupted');
-        return null;
-      }
-      
-      // Log first few bytes to verify it's video data
-      const header = media.data.substring(0, 20);
-      console.log('🔍 Video data header:', header);
-    }
-
-    return FileUtils.saveMedia(media, message.id.id);
-    
-  } catch (err) {
-    console.error('❌ Error while downloading media:', err);
-    console.error('📋 Error details:', {
-      name: err.name,
-      message: err.message,
-      stack: err.stack?.split('\n').slice(0, 3).join('\n')
-    });
-    
-    // For videos that fail to download, you might want to save the message info
-    if (message.type === 'video') {
-      console.log('💡 Video download failed. Consider implementing fallback strategy.');
-      // You could save a placeholder or the video URL if available
-    }
-    
-    return null;
   }
-}
+
+  // Pre-fetch groups in background
+  async prefetchGroups() {
+    try {
+      console.log('🔄 Pre-fetching groups in background...');
+      const groups = await this.fetchGroupsOptimized();
+      console.log(`✅ Pre-fetched ${groups.length} groups`);
+    } catch (error) {
+      console.error('Error pre-fetching groups:', error);
+    }
+  }
+
+  // Optimized group fetching
+  async fetchGroupsOptimized() {
+    console.log('📋 Fetching groups...');
+    
+    const startTime = Date.now();
+    const chats = await this.client.getChats();
+    
+    // Process only groups in parallel
+    const groups = await Promise.all(
+      chats
+        .filter(chat => chat.isGroup)
+        .map(async (group) => {
+          try {
+            // Fetch minimal data needed
+            return {
+              id: group.id._serialized,
+              name: group.name || 'Unnamed Group',
+              participantCount: group.participants?.length || 0,
+              // Don't fetch unnecessary data
+              lastMessage: group.lastMessage?.body?.substring(0, 50) || '',
+              timestamp: group.timestamp || 0
+            };
+          } catch (error) {
+            console.warn(`Error processing group ${group.name}:`, error);
+            return null;
+          }
+        })
+    );
+
+    const validGroups = groups.filter(g => g !== null);
+    const fetchTime = Date.now() - startTime;
+    console.log(`✅ Fetched ${validGroups.length} groups in ${fetchTime}ms`);
+    
+    // Cache the results
+    this.groupsCache = validGroups;
+    this.groupsCacheTime = Date.now();
+    
+    return validGroups;
+  }
 
   async getGroups() {
-    if (!this.isAuthenticated || !this.client) {
-      throw new Error('WhatsApp not authenticated');
+    // Check if client is ready
+    if (!this.isReady || !this.client) {
+      throw new Error('WhatsApp client not ready. Please wait a moment and try again.');
     }
     
-    const chats = await this.client.getChats();
-    return chats
-      .filter(chat => chat.isGroup)
-      .map(group => ({
-        id: group.id._serialized,
-        name: group.name,
-        participantCount: group.participants.length
-      }));
+    // Return cached groups if available and fresh
+    if (this.groupsCache && this.groupsCacheTime) {
+      const cacheAge = Date.now() - this.groupsCacheTime;
+      if (cacheAge < this.CACHE_DURATION) {
+        console.log('📦 Returning cached groups');
+        return this.groupsCache;
+      }
+    }
+    
+    // Fetch fresh groups
+    return await this.fetchGroupsOptimized();
+  }
+
+  // Add method to check if client is ready
+  isClientReady() {
+    return this.isReady && this.isAuthenticated && this.client;
+  }
+
+  // Rest of your methods remain the same...
+  async handleIncomingMessage(message) {
+    console.log('Received message:', message.body || `[${message.type}]`);
+    
+    if (!this.selectedGroup || !message.from.includes('@g.us')) return;
+    if (message.from !== this.selectedGroup.id) return;
+    if (this.selectedUser && message.author !== this.selectedUser) return;
+    
+    let mediaPath = null;
+
+    // Handle media download with special handling for videos
+    if (message.hasMedia) {
+      console.log(`📦 Message has media. Type: ${message.type}, From: ${message.author}`);
+      
+      // For videos, we might want to handle them differently
+      if (message.type === 'video') {
+        console.log('🎥 Processing video message...');
+        // You could implement a queue system for videos or handle them asynchronously
+      }
+      
+      mediaPath = await this.downloadMedia(message);
+      
+      // If video download failed, we still want to record the message
+      if (!mediaPath && message.type === 'video') {
+        console.log('📝 Recording video message without media file');
+      }
+    }
+
+    const messageData = MessageUtils.createMessageData(message, mediaPath);
+    this.messageHistory.push(messageData);
+    
+    // Group messages and update RSS
+    const grouped = MessageUtils.groupMessages([messageData]);
+    if (grouped.length > 0) {
+      this.rssManager.updateFeed(grouped[0], this.messageHistory);
+      this.io.emit('new_message', grouped[0]);
+    }
+    FileUtils.updateMediaIndex(this.messageHistory);
+  }
+
+  async downloadMedia(message) {
+    try {
+      console.log(`🎬 Starting media download for message ${message.id.id}`);
+      console.log(`📊 Media info - Type: ${message.type}, Has Media: ${message.hasMedia}`);
+      
+      // Add retry logic for video downloads
+      let media = null;
+      let attempts = 0;
+      const maxAttempts = 3;
+      
+      while (attempts < maxAttempts && !media) {
+        try {
+          attempts++;
+          console.log(`📥 Download attempt ${attempts}/${maxAttempts}...`);
+          
+          // For videos, we might need to wait a bit before downloading
+          if (message.type === 'video' && attempts > 1) {
+            console.log('⏳ Waiting before retry...');
+            await new Promise(resolve => setTimeout(resolve, 2000 * attempts));
+          }
+          
+          // Download with timeout
+          const downloadPromise = message.downloadMedia();
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Download timeout')), 60000) // 60 second timeout
+          );
+          
+          media = await Promise.race([downloadPromise, timeoutPromise]);
+          
+        } catch (downloadError) {
+          console.warn(`⚠️ Download attempt ${attempts} failed:`, downloadError.message);
+          if (attempts === maxAttempts) {
+            throw downloadError;
+          }
+        }
+      }
+
+      if (!media) {
+        console.error('❌ Media download failed - no media object returned');
+        return null;
+      }
+
+      // Check if media data exists
+      if (!media.data) {
+        console.error('❌ Media download failed - no data in media object');
+        console.log('📋 Media object details:', {
+          hasData: !!media.data,
+          mimetype: media.mimetype,
+          filename: media.filename,
+          mediaKeys: Object.keys(media)
+        });
+        return null;
+      }
+
+      console.log('✅ Media object received:', {
+        mimetype: media.mimetype,
+        filename: media.filename,
+        size: media.data.length,
+        dataType: typeof media.data
+      });
+
+      // For videos, check if the data is valid
+      if (message.type === 'video') {
+        // Videos should have substantial size
+        if (media.data.length < 1000) {
+          console.warn('⚠️ Video data seems too small, might be corrupted');
+          return null;
+        }
+        
+        // Log first few bytes to verify it's video data
+        const header = media.data.substring(0, 20);
+        console.log('🔍 Video data header:', header);
+      }
+
+      return FileUtils.saveMedia(media, message.id.id);
+      
+    } catch (err) {
+      console.error('❌ Error while downloading media:', err);
+      console.error('📋 Error details:', {
+        name: err.name,
+        message: err.message,
+        stack: err.stack?.split('\n').slice(0, 3).join('\n')
+      });
+      
+      // For videos that fail to download, you might want to save the message info
+      if (message.type === 'video') {
+        console.log('💡 Video download failed. Consider implementing fallback strategy.');
+        // You could save a placeholder or the video URL if available
+      }
+      
+      return null;
+    }
   }
 
   async selectGroup(groupId) {
-    if (!this.isAuthenticated || !this.client) {
-      throw new Error('WhatsApp not authenticated');
+    if (!this.isReady || !this.client) {
+      throw new Error('WhatsApp not ready');
     }
     
     const chat = await this.client.getChatById(groupId);
@@ -357,9 +459,11 @@ class WhatsAppManager {
       
       // Reset all state
       this.isAuthenticated = false;
+      this.isReady = false;
       this.selectedGroup = null;
       this.selectedUser = null;
       this.messageHistory = [];
+      this.groupsCache = null;
       this.client = null;
       
       // Reset RSS manager
@@ -377,6 +481,7 @@ class WhatsAppManager {
       
       // Force reset state even if client destruction fails
       this.isAuthenticated = false;
+      this.isReady = false;
       this.selectedGroup = null;
       this.selectedUser = null;
       this.messageHistory = [];
@@ -388,22 +493,13 @@ class WhatsAppManager {
     }
   }
 
-  // Enhanced initialize method to handle re-initialization
-  initialize() {
-    this.client = new Client({
-      authStrategy: new LocalAuth(),
-      puppeteer: config.whatsapp.puppeteer
-    });
-
-    this.setupEventHandlers();
-    this.client.initialize();
-  }
-
   getStatus() {
     return {
       authenticated: this.isAuthenticated,
+      ready: this.isReady,
       selectedGroup: this.selectedGroup?.name || null,
-      selectedUser: this.selectedUser || null
+      selectedUser: this.selectedUser || null,
+      cachedGroups: this.groupsCache?.length || 0
     };
   }
 
