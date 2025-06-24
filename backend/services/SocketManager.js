@@ -1,32 +1,41 @@
 class SocketManager {
-  constructor(io, whatsappManager) {
+  constructor(io, whatsappManagerPool) {
     this.io = io;
-    this.whatsappManager = whatsappManager;
+    this.whatsappManagerPool = whatsappManagerPool;
     this.setupSocketHandlers();
   }
 
   setupSocketHandlers() {
     this.io.on('connection', (socket) => {
-      console.log('Client connected:', socket.id);
+      console.log('Client connected:', socket.id, 'User:', socket.userId);
+      
+      // Register socket for user
+      this.whatsappManagerPool.addUserSocket(socket.userId, socket.id);
+      
+      // Join user-specific room
+      socket.join(`user_${socket.userId}`);
+      
+      // Get WhatsApp manager for this user
+      const manager = this.whatsappManagerPool.getManager(socket.userId);
       
       // Send current status to newly connected client
-      socket.emit('status', this.whatsappManager.getStatus());
+      socket.emit('status', manager.getStatus());
       
-      // NEW: Handle ready state checking
+      // Handle ready state checking
       socket.on('check_ready', () => {
-        socket.emit('status', this.whatsappManager.getStatus());
+        socket.emit('status', manager.getStatus());
       });
       
-      // NEW: Handle client requesting groups when ready
+      // Handle client requesting groups when ready
       socket.on('request_groups', async () => {
         try {
-          if (this.whatsappManager.isClientReady()) {
-            const groups = await this.whatsappManager.getGroups();
+          if (manager.isClientReady()) {
+            const groups = await manager.getGroups();
             socket.emit('groups_list', groups);
           } else {
             socket.emit('not_ready', { 
               message: 'WhatsApp client is still initializing',
-              status: this.whatsappManager.getStatus()
+              status: manager.getStatus()
             });
           }
         } catch (error) {
@@ -34,20 +43,95 @@ class SocketManager {
         }
       });
       
+      // Handle QR code request
+      socket.on('request_qr', () => {
+        if (!manager.isAuthenticated) {
+          manager.initialize();
+        }
+      });
+      
+      // Handle message sending (if you want to add this feature)
+      socket.on('send_message', async (data) => {
+        try {
+          const { chatId, message } = data;
+          if (manager.isClientReady() && manager.client) {
+            await manager.client.sendMessage(chatId, message);
+            socket.emit('message_sent', { success: true });
+          } else {
+            socket.emit('error', { message: 'WhatsApp client not ready' });
+          }
+        } catch (error) {
+          socket.emit('error', { message: error.message });
+        }
+      });
+      
+      // Handle disconnection
       socket.on('disconnect', () => {
-        console.log('Client disconnected:', socket.id);
+        console.log('Client disconnected:', socket.id, 'User:', socket.userId);
+        
+        // Remove socket from user's socket list
+        this.whatsappManagerPool.removeUserSocket(socket.userId, socket.id);
+        
+        // Update last activity for the manager
+        const manager = this.whatsappManagerPool.getManager(socket.userId);
+        if (manager) {
+          manager.lastActivity = Date.now();
+        }
+      });
+      
+      // Handle manual WhatsApp logout
+      socket.on('whatsapp_logout', async () => {
+        try {
+          await manager.logout();
+          socket.emit('whatsapp_disconnected', { message: 'Logged out successfully' });
+        } catch (error) {
+          socket.emit('error', { message: error.message });
+        }
+      });
+      
+      // Handle refresh groups
+      socket.on('refresh_groups', async () => {
+        try {
+          if (manager.isClientReady()) {
+            // Clear cache to force refresh
+            manager.groupsCache = null;
+            manager.groupsCacheTime = null;
+            
+            const groups = await manager.getGroups();
+            socket.emit('groups_list', groups);
+          } else {
+            socket.emit('error', { message: 'WhatsApp client not ready' });
+          }
+        } catch (error) {
+          socket.emit('error', { message: error.message });
+        }
       });
     });
   }
 
-  // Method to emit events to all connected clients
-  emit(event, data) {
+  // Method to emit events to all connected clients of a specific user
+  emitToUser(userId, event, data) {
+    this.io.to(`user_${userId}`).emit(event, data);
+  }
+
+  // Method to emit to all connected clients
+  broadcast(event, data) {
     this.io.emit(event, data);
   }
 
-  // Method to emit to a specific socket
-  emitToSocket(socketId, event, data) {
-    this.io.to(socketId).emit(event, data);
+  // Get connection statistics
+  getStats() {
+    const stats = {
+      totalConnections: this.io.engine.clientsCount,
+      userConnections: {}
+    };
+    
+    // Count connections per user
+    this.whatsappManagerPool.userSockets.forEach((sockets, userId) => {
+      stats.userConnections[userId] = sockets.size;
+    });
+    
+    return stats;
   }
 }
 

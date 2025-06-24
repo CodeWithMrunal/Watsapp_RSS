@@ -1,44 +1,83 @@
 const express = require('express');
 const moment = require('moment');
 const FileUtils = require('../utils/fileUtils');
+const { authenticate } = require('../middleware/auth');
+const { UserGroup, UserMessage } = require('../models');
 
 const router = express.Router();
 
-function createApiRoutes(whatsappManager) {
-  router.get('/status', (req, res) => {
-    res.json(whatsappManager.getStatus());
+function createApiRoutes(whatsappManagerPool) {
+  // All routes now require authentication
+  router.use(authenticate);
+
+  // Get WhatsApp manager for authenticated user
+  const getManager = (req) => {
+    return whatsappManagerPool.getManager(req.userId);
+  };
+
+  router.get('/status', async (req, res) => {
+    const manager = getManager(req);
+    res.json(manager.getStatus());
   });
 
-  // UPDATED: Add ready state checking
   router.get('/groups', async (req, res) => {
-    console.log('GET /api/groups');
+    console.log(`GET /api/groups for user ${req.userId}`);
     
     try {
-      // Check if client is ready first
-      if (!whatsappManager.isClientReady()) {
+      const manager = getManager(req);
+      
+      if (!manager.isClientReady()) {
         return res.status(503).json({ 
           error: 'WhatsApp client is still initializing. Please wait a moment and try again.',
-          status: whatsappManager.getStatus()
+          status: manager.getStatus()
         });
       }
       
-      const groups = await whatsappManager.getGroups();
+      const groups = await manager.getGroups();
+      
+      // Save groups to database for this user
+      for (const group of groups) {
+        await UserGroup.findOrCreate({
+          where: {
+            user_id: req.userId,
+            group_id: group.id
+          },
+          defaults: {
+            group_name: group.name,
+            participant_count: group.participantCount
+          }
+        });
+      }
+      
       res.json(groups);
     } catch (error) {
       console.error('Error fetching groups:', error);
       res.status(500).json({ 
         error: error.message,
-        status: whatsappManager.getStatus()
+        status: getManager(req).getStatus()
       });
     }
   });
 
   router.post('/select-group', async (req, res) => {
-    console.log('POST /api/select-group', req.body);
+    console.log(`POST /api/select-group for user ${req.userId}`, req.body);
     const { groupId } = req.body;
     
     try {
-      const selectedGroup = await whatsappManager.selectGroup(groupId);
+      const manager = getManager(req);
+      const selectedGroup = await manager.selectGroup(groupId);
+      
+      // Update database
+      await UserGroup.update(
+        { selected_at: new Date() },
+        { 
+          where: { 
+            user_id: req.userId, 
+            group_id: groupId 
+          } 
+        }
+      );
+      
       res.json({ success: true, group: selectedGroup });
     } catch (error) {
       console.error('Error selecting group:', error);
@@ -47,10 +86,11 @@ function createApiRoutes(whatsappManager) {
   });
 
   router.get('/group-participants', async (req, res) => {
-    console.log('GET /api/group-participants');
+    console.log(`GET /api/group-participants for user ${req.userId}`);
     
     try {
-      const participants = whatsappManager.getGroupParticipants();
+      const manager = getManager(req);
+      const participants = manager.getGroupParticipants();
       res.json(participants);
     } catch (error) {
       console.error('Error fetching participants:', error);
@@ -58,12 +98,27 @@ function createApiRoutes(whatsappManager) {
     }
   });
 
-  router.post('/select-user', (req, res) => {
-    console.log('POST /api/select-user', req.body);
+  router.post('/select-user', async (req, res) => {
+    console.log(`POST /api/select-user for user ${req.userId}`, req.body);
     const { userId } = req.body;
     
     try {
-      const selectedUser = whatsappManager.selectUser(userId);
+      const manager = getManager(req);
+      const selectedUser = manager.selectUser(userId);
+      
+      // Update monitoring user in database
+      if (manager.selectedGroup) {
+        await UserGroup.update(
+          { monitoring_user: userId === 'all' ? null : userId },
+          { 
+            where: { 
+              user_id: req.userId, 
+              group_id: manager.selectedGroup.id 
+            } 
+          }
+        );
+      }
+      
       res.json({ success: true, selectedUser });
     } catch (error) {
       console.error('Error selecting user:', error);
@@ -72,11 +127,34 @@ function createApiRoutes(whatsappManager) {
   });
 
   router.post('/fetch-history', async (req, res) => {
-    console.log('POST /api/fetch-history', req.body);
+    console.log(`POST /api/fetch-history for user ${req.userId}`, req.body);
     const { limit = 50 } = req.body;
     
     try {
-      const messages = await whatsappManager.fetchHistory(limit);
+      const manager = getManager(req);
+      const messages = await manager.fetchHistory(limit);
+      
+      // Save messages to database
+      for (const messageGroup of messages) {
+        for (const msg of messageGroup.messages) {
+          await UserMessage.findOrCreate({
+            where: {
+              user_id: req.userId,
+              message_id: msg.id
+            },
+            defaults: {
+              group_id: manager.selectedGroup.id,
+              author: msg.author,
+              message_type: msg.type,
+              body: msg.body,
+              has_media: msg.hasMedia,
+              media_path: msg.mediaPath,
+              timestamp: msg.timestamp
+            }
+          });
+        }
+      }
+      
       res.json({ messages });
     } catch (error) {
       console.error('Error fetching history:', error);
@@ -84,11 +162,12 @@ function createApiRoutes(whatsappManager) {
     }
   });
 
-  router.get('/messages', (req, res) => {
+  router.get('/messages', async (req, res) => {
     const { grouped = true } = req.query;
     
     try {
-      const messages = whatsappManager.getMessages(grouped === 'true');
+      const manager = getManager(req);
+      const messages = manager.getMessages(grouped === 'true');
       res.json(messages);
     } catch (error) {
       console.error('Error getting messages:', error);
@@ -96,9 +175,10 @@ function createApiRoutes(whatsappManager) {
     }
   });
 
-  router.post('/initialize', (req, res) => {
+  router.post('/initialize', async (req, res) => {
     try {
-      whatsappManager.initialize();
+      const manager = getManager(req);
+      manager.initialize();
       res.json({ success: true });
     } catch (error) {
       console.error('Error initializing WhatsApp manager:', error);
@@ -106,12 +186,16 @@ function createApiRoutes(whatsappManager) {
     }
   });
 
-  // NEW: Logout endpoint
   router.post('/logout', async (req, res) => {
-    console.log('POST /api/logout - Logging out WhatsApp session');
+    console.log(`POST /api/logout for user ${req.userId}`);
     
     try {
-      await whatsappManager.logout();
+      const manager = getManager(req);
+      await manager.logout();
+      
+      // Remove manager from pool
+      whatsappManagerPool.removeManager(req.userId);
+      
       res.json({ success: true, message: 'Successfully logged out' });
     } catch (error) {
       console.error('Error during logout:', error);
@@ -119,17 +203,23 @@ function createApiRoutes(whatsappManager) {
     }
   });
 
-  router.post('/backup-messages', (req, res) => {
-    const messageHistory = whatsappManager.messageHistory;
+  router.post('/backup-messages', async (req, res) => {
+    const manager = getManager(req);
+    const messageHistory = manager.messageHistory;
     
     if (!messageHistory || messageHistory.length === 0) {
       return res.status(400).json({ error: 'No messages to backup' });
     }
 
     const timestamp = moment().format('YYYY-MM-DD_HH-mm-ss');
-    const filename = `./backups/messages-${timestamp}.json`;
+    const userDir = `./backups/user_${req.userId}`;
+    const filename = `${userDir}/messages-${timestamp}.json`;
 
     try {
+      // Ensure user backup directory exists
+      const fs = require('fs-extra');
+      fs.ensureDirSync(userDir);
+      
       const success = FileUtils.saveJSON(filename, messageHistory);
       if (success) {
         res.json({ success: true, message: `Messages backed up to ${filename}` });
@@ -139,6 +229,23 @@ function createApiRoutes(whatsappManager) {
     } catch (err) {
       console.error('❌ Failed to write backup:', err);
       res.status(500).json({ error: 'Failed to write backup file' });
+    }
+  });
+
+  // Get user's storage usage
+  router.get('/storage-usage', async (req, res) => {
+    try {
+      const user = await req.user.reload();
+      const storageInfo = {
+        used_mb: user.storage_used_mb,
+        quota_mb: user.storage_quota_mb,
+        percentage: (user.storage_used_mb / user.storage_quota_mb) * 100,
+        remaining_mb: user.storage_quota_mb - user.storage_used_mb
+      };
+      res.json(storageInfo);
+    } catch (error) {
+      console.error('Error getting storage usage:', error);
+      res.status(500).json({ error: 'Failed to get storage usage' });
     }
   });
 

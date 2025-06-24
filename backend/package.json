@@ -4,20 +4,28 @@
   "description": "WhatsApp monitoring backend with RSS feed generation",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node Server.js",
+    "dev": "nodemon Server.js",
+    "setup": "node setup.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "whatsapp-web.js": "^1.23.0",
-    "qrcode": "^1.5.3",
-    "socket.io": "^4.7.2",
+    "axios": "^1.10.0",
+    "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
-    "rss": "^1.2.2",
-    "fs-extra": "^11.1.1",
+    "dotenv": "^16.5.0",
+    "express": "^4.18.2",
+    "express-validator": "^7.2.1",
+    "fs-extra": "^11.3.0",
+    "jsonwebtoken": "^9.0.2",
     "moment": "^2.29.4",
+    "nodemailer": "^6.9.4",
+    "qrcode": "^1.5.3",
+    "rss": "^1.2.2",
+    "sequelize": "^6.37.7",
+    "socket.io": "^4.7.2",
+    "sqlite3": "^5.1.7",
     "uuid": "^9.0.0",
-    "nodemailer": "^6.9.4"
+    "whatsapp-web.js": "^1.23.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
