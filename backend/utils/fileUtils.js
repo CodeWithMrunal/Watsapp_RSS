@@ -10,17 +10,19 @@ class FileUtils {
     console.log('✅ All directories ensured');
   }
 
-  static saveMedia(mediaData, messageId) {
+  static saveMedia(mediaData, messageId, userMediaPath) {
     try {
       const ext = mediaData.mimetype.split('/')[1] || 'bin';
       const filename = `media_${Date.now()}_${messageId}.${ext}`;
-      const mediaPath = path.join('media', filename);
-      const fullPath = path.join(__dirname, '..', mediaPath);
+      const fullPath = userMediaPath ? 
+        path.join(userMediaPath, filename) : 
+        path.join(__dirname, '..', 'media', filename);
 
+      fs.ensureDirSync(path.dirname(fullPath));
       fs.writeFileSync(fullPath, mediaData.data, { encoding: 'base64' });
-      console.log(`✅ Media saved to: ${mediaPath}`);
+      console.log(`✅ Media saved to: ${fullPath}`);
       
-      return mediaPath;
+      return filename;
     } catch (error) {
       console.error('❌ Error saving media:', error);
       return null;
@@ -29,6 +31,7 @@ class FileUtils {
 
   static saveJSON(filePath, data) {
     try {
+      fs.ensureDirSync(path.dirname(filePath));
       fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
       return true;
     } catch (error) {
@@ -112,7 +115,7 @@ class FileUtils {
     }));
   }
 
-  static updateMediaIndex(messageHistory) {
+  static updateMediaIndex(messageHistory, customPath = null) {
     // Filter messages (including text messages without media)
     const relevantMessages = messageHistory
       .filter(msg => msg.hasMedia || (msg.body && msg.body.trim() !== ''))
@@ -132,7 +135,8 @@ class FileUtils {
     // Group messages by the 5-minute rule
     const groupedMessages = this.groupMessagesByTimestamp(relevantMessages);
 
-    const success = this.saveJSON('./media/media.json', groupedMessages);
+    const mediaJsonPath = customPath || './media/media.json';
+    const success = this.saveJSON(mediaJsonPath, groupedMessages);
     if (success) {
       console.log(`📦 media.json updated with ${groupedMessages.length} grouped entries from ${relevantMessages.length} messages`);
     }

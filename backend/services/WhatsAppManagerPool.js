@@ -9,6 +9,8 @@ class WhatsAppManagerPool {
     this.rssManagerFactory = rssManagerFactory;
     this.managers = new Map(); // userId -> WhatsAppManager instance
     this.userSockets = new Map(); // userId -> Set of socket IDs
+    this.initializationQueue = []; // Queue for initialization
+    this.isInitializing = false; // Flag to track if initialization is in progress
     
     console.log('✅ WhatsAppManagerPool initialized');
   }
@@ -16,7 +18,7 @@ class WhatsAppManagerPool {
   /**
    * Get or create a WhatsApp manager for a user
    */
-  getManager(userId) {
+  async getManager(userId) {
     if (!this.managers.has(userId)) {
       // Create user-specific directories
       this.ensureUserDirectories(userId);
@@ -26,20 +28,80 @@ class WhatsAppManagerPool {
       
       // Create WhatsApp manager with user-specific configuration
       const manager = new WhatsAppManager(
-        this.io, 
+        this.createUserIoWrapper(userId), 
         rssManager,
         userId,
         this.getUserDataPath(userId)
       );
       
-      // Set up user-specific event handlers
-      this.setupManagerEvents(manager, userId);
-      
       this.managers.set(userId, manager);
       console.log(`✅ Created WhatsApp manager for user ${userId}`);
+      
+      // Add to initialization queue instead of initializing immediately
+      this.queueInitialization(manager, userId);
     }
     
     return this.managers.get(userId);
+  }
+
+  /**
+   * Queue initialization to prevent conflicts
+   */
+  async queueInitialization(manager, userId) {
+    this.initializationQueue.push({ manager, userId });
+    
+    // If not currently initializing, start processing queue
+    if (!this.isInitializing) {
+      this.processInitializationQueue();
+    }
+  }
+
+  /**
+   * Process initialization queue with delays
+   */
+  async processInitializationQueue() {
+    if (this.initializationQueue.length === 0) {
+      this.isInitializing = false;
+      return;
+    }
+
+    this.isInitializing = true;
+    const { manager, userId } = this.initializationQueue.shift();
+
+    try {
+      console.log(`🔄 Processing initialization for user ${userId}`);
+      
+      // Add delay before initialization to prevent Chrome conflicts
+      if (this.managers.size > 1) {
+        console.log(`⏳ Waiting 3 seconds before initializing user ${userId}...`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      }
+      
+      // Initialize the manager
+      await manager.initialize();
+      
+    } catch (error) {
+      console.error(`❌ Error initializing manager for user ${userId}:`, error);
+      this.emitToUser(userId, 'error', { 
+        message: 'Failed to initialize WhatsApp. Please try again.' 
+      });
+    }
+
+    // Process next in queue
+    setTimeout(() => {
+      this.processInitializationQueue();
+    }, 1000); // Small delay between initializations
+  }
+
+  /**
+   * Create a user-specific IO wrapper
+   */
+  createUserIoWrapper(userId) {
+    return {
+      emit: (event, data) => {
+        this.emitToUser(userId, event, data);
+      }
+    };
   }
 
   /**
@@ -50,9 +112,7 @@ class WhatsAppManagerPool {
     if (manager) {
       try {
         // Destroy WhatsApp client if exists
-        if (manager.client) {
-          await manager.client.destroy();
-        }
+        await manager.destroy();
       } catch (error) {
         console.error(`Error destroying client for user ${userId}:`, error);
       }
@@ -100,18 +160,6 @@ class WhatsAppManagerPool {
   }
 
   /**
-   * Set up event handlers for a manager
-   */
-  setupManagerEvents(manager, userId) {
-    // Override the io property to emit only to the specific user
-    manager.io = {
-      emit: (event, data) => {
-        this.emitToUser(userId, event, data);
-      }
-    };
-  }
-
-  /**
    * Ensure user directories exist
    */
   ensureUserDirectories(userId) {
@@ -119,7 +167,9 @@ class WhatsAppManagerPool {
       `./media/user_${userId}`,
       `./rss/user_${userId}`,
       `./backups/user_${userId}`,
-      `./.wwebjs_auth/user_${userId}`
+      `./.wwebjs_auth/user_${userId}`,
+      `./.wwebjs_auth/user_${userId}/session`,
+      `./.wwebjs_auth/user_${userId}/chrome-user-data`
     ];
     
     dirs.forEach(dir => {
@@ -151,9 +201,8 @@ class WhatsAppManagerPool {
       });
       
       if (session && session.session_data) {
-        const manager = this.getManager(userId);
+        const manager = await this.getManager(userId);
         // Session data would be used to restore WhatsApp connection
-        // This depends on how whatsapp-web.js handles session restoration
         return true;
       }
       

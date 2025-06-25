@@ -1,16 +1,22 @@
 const RSS = require('rss');
 const fs = require('fs-extra');
+const path = require('path');
 const config = require('../config');
 
 class RSSManager {
-  constructor() {
+  constructor(userConfig = null, userId = null) {
+    this.userId = userId;
+    this.userConfig = userConfig || config.rss;
     this.rssFeed = null;
     this.initialize();
   }
 
   initialize() {
-    this.rssFeed = new RSS(config.rss);
-    console.log('✅ RSS Feed initialized');
+    this.rssFeed = new RSS({
+      ...this.userConfig,
+      title: this.userId ? `${this.userConfig.title} - User ${this.userId}` : this.userConfig.title
+    });
+    console.log(`✅ RSS Feed initialized${this.userId ? ` for user ${this.userId}` : ''}`);
   }
 
   /**
@@ -91,21 +97,28 @@ class RSSManager {
 
     // Save both feed.xml and messages.json
     try {
+      // Determine the RSS directory path
+      const rssDir = this.userConfig.outputPath ? 
+        path.dirname(this.userConfig.outputPath) : 
+        (this.userId ? `./rss/user_${this.userId}` : './rss');
+      
       // Ensure RSS directory exists
-      fs.ensureDirSync('./rss');
+      fs.ensureDirSync(rssDir);
       
       // Save RSS feed with proper formatting
       const rssXml = this.rssFeed.xml({ indent: true });
-      fs.writeFileSync('./rss/feed.xml', rssXml);
+      const feedPath = this.userConfig.outputPath || path.join(rssDir, 'feed.xml');
+      fs.writeFileSync(feedPath, rssXml);
       
       // Save message history with cleaned content
-      fs.writeFileSync('./rss/messages.json', JSON.stringify(messageHistory, null, 2));
+      const messagesPath = path.join(rssDir, 'messages.json');
+      fs.writeFileSync(messagesPath, JSON.stringify(messageHistory, null, 2));
       
       // Log success with stats
       const totalMessages = messageHistory.length;
       const latestGroupSize = messageGroup.messages.length;
       
-      console.log('✅ RSS feed and messageHistory exported');
+      console.log(`✅ RSS feed and messageHistory exported${this.userId ? ` for user ${this.userId}` : ''}`);
       console.log(`   📊 Total messages: ${totalMessages}`);
       console.log(`   📬 Latest group: ${latestGroupSize} message${latestGroupSize > 1 ? 's' : ''}`);
       

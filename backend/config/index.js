@@ -4,37 +4,37 @@ const config = {
   server: {
     port: process.env.PORT || 3001,
     cors: {
-      origin: "http://localhost:5173",
-      methods: ["GET", "POST"]
+      origin: process.env.CORS_ORIGIN || "http://localhost:5173",
+      methods: ["GET", "POST"],
+      credentials: true
     }
   },
   
   directories: {
     rss: './rss',
     backups: './backups',
-    media: './media'
+    media: './media',
+    data: './data',
+    auth: './.wwebjs_auth'
   },
   
   whatsapp: {
-  puppeteer: {
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process',
-      '--disable-gpu',
-      '--disable-web-security',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--shm-size=3gb' // Increase shared memory size for video handling
-    ],
-    defaultViewport: null,
-    timeout: 60000 // Increase timeout
-  }
-},
+    puppeteer: {
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu'
+      ],
+      defaultViewport: null,
+      timeout: 60000
+      // Let Puppeteer find Chrome automatically
+    }
+  },
   
   rss: {
     title: 'WhatsApp Monitor Feed',
@@ -46,6 +46,14 @@ const config = {
   
   messaging: {
     groupTimeoutMinutes: 5
+  },
+  
+  // Multi-tenancy settings
+  multiTenant: {
+    maxUsersPerInstance: 10,
+    initializationDelay: 5000, // Increased delay
+    cleanupInterval: 5 * 60 * 1000,
+    inactiveThreshold: 30 * 60 * 1000
   }
 };
 

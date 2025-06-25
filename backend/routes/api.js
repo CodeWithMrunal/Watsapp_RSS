@@ -10,21 +10,25 @@ function createApiRoutes(whatsappManagerPool) {
   // All routes now require authentication
   router.use(authenticate);
 
-  // Get WhatsApp manager for authenticated user
-  const getManager = (req) => {
-    return whatsappManagerPool.getManager(req.userId);
+  // Get WhatsApp manager for authenticated user (async)
+  const getManager = async (req) => {
+    return await whatsappManagerPool.getManager(req.userId);
   };
 
   router.get('/status', async (req, res) => {
-    const manager = getManager(req);
-    res.json(manager.getStatus());
+    try {
+      const manager = await getManager(req);
+      res.json(manager.getStatus());
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
   router.get('/groups', async (req, res) => {
     console.log(`GET /api/groups for user ${req.userId}`);
     
     try {
-      const manager = getManager(req);
+      const manager = await getManager(req);
       
       if (!manager.isClientReady()) {
         return res.status(503).json({ 
@@ -52,9 +56,10 @@ function createApiRoutes(whatsappManagerPool) {
       res.json(groups);
     } catch (error) {
       console.error('Error fetching groups:', error);
+      const manager = await getManager(req);
       res.status(500).json({ 
         error: error.message,
-        status: getManager(req).getStatus()
+        status: manager.getStatus()
       });
     }
   });
@@ -64,7 +69,7 @@ function createApiRoutes(whatsappManagerPool) {
     const { groupId } = req.body;
     
     try {
-      const manager = getManager(req);
+      const manager = await getManager(req);
       const selectedGroup = await manager.selectGroup(groupId);
       
       // Update database
@@ -89,7 +94,7 @@ function createApiRoutes(whatsappManagerPool) {
     console.log(`GET /api/group-participants for user ${req.userId}`);
     
     try {
-      const manager = getManager(req);
+      const manager = await getManager(req);
       const participants = manager.getGroupParticipants();
       res.json(participants);
     } catch (error) {
@@ -103,7 +108,7 @@ function createApiRoutes(whatsappManagerPool) {
     const { userId } = req.body;
     
     try {
-      const manager = getManager(req);
+      const manager = await getManager(req);
       const selectedUser = manager.selectUser(userId);
       
       // Update monitoring user in database
@@ -131,27 +136,29 @@ function createApiRoutes(whatsappManagerPool) {
     const { limit = 50 } = req.body;
     
     try {
-      const manager = getManager(req);
+      const manager = await getManager(req);
       const messages = await manager.fetchHistory(limit);
       
       // Save messages to database
-      for (const messageGroup of messages) {
-        for (const msg of messageGroup.messages) {
-          await UserMessage.findOrCreate({
-            where: {
-              user_id: req.userId,
-              message_id: msg.id
-            },
-            defaults: {
-              group_id: manager.selectedGroup.id,
-              author: msg.author,
-              message_type: msg.type,
-              body: msg.body,
-              has_media: msg.hasMedia,
-              media_path: msg.mediaPath,
-              timestamp: msg.timestamp
-            }
-          });
+      if (manager.selectedGroup) {
+        for (const messageGroup of messages) {
+          for (const msg of messageGroup.messages) {
+            await UserMessage.findOrCreate({
+              where: {
+                user_id: req.userId,
+                message_id: msg.id
+              },
+              defaults: {
+                group_id: manager.selectedGroup.id,
+                author: msg.author,
+                message_type: msg.type,
+                body: msg.body,
+                has_media: msg.hasMedia,
+                media_path: msg.mediaPath,
+                timestamp: msg.timestamp
+              }
+            });
+          }
         }
       }
       
@@ -166,7 +173,7 @@ function createApiRoutes(whatsappManagerPool) {
     const { grouped = true } = req.query;
     
     try {
-      const manager = getManager(req);
+      const manager = await getManager(req);
       const messages = manager.getMessages(grouped === 'true');
       res.json(messages);
     } catch (error) {
@@ -177,8 +184,8 @@ function createApiRoutes(whatsappManagerPool) {
 
   router.post('/initialize', async (req, res) => {
     try {
-      const manager = getManager(req);
-      manager.initialize();
+      const manager = await getManager(req);
+      await manager.initialize();
       res.json({ success: true });
     } catch (error) {
       console.error('Error initializing WhatsApp manager:', error);
@@ -190,11 +197,11 @@ function createApiRoutes(whatsappManagerPool) {
     console.log(`POST /api/logout for user ${req.userId}`);
     
     try {
-      const manager = getManager(req);
+      const manager = await getManager(req);
       await manager.logout();
       
       // Remove manager from pool
-      whatsappManagerPool.removeManager(req.userId);
+      await whatsappManagerPool.removeManager(req.userId);
       
       res.json({ success: true, message: 'Successfully logged out' });
     } catch (error) {
@@ -204,18 +211,18 @@ function createApiRoutes(whatsappManagerPool) {
   });
 
   router.post('/backup-messages', async (req, res) => {
-    const manager = getManager(req);
-    const messageHistory = manager.messageHistory;
-    
-    if (!messageHistory || messageHistory.length === 0) {
-      return res.status(400).json({ error: 'No messages to backup' });
-    }
-
-    const timestamp = moment().format('YYYY-MM-DD_HH-mm-ss');
-    const userDir = `./backups/user_${req.userId}`;
-    const filename = `${userDir}/messages-${timestamp}.json`;
-
     try {
+      const manager = await getManager(req);
+      const messageHistory = manager.messageHistory;
+      
+      if (!messageHistory || messageHistory.length === 0) {
+        return res.status(400).json({ error: 'No messages to backup' });
+      }
+
+      const timestamp = moment().format('YYYY-MM-DD_HH-mm-ss');
+      const userDir = `./backups/user_${req.userId}`;
+      const filename = `${userDir}/messages-${timestamp}.json`;
+
       // Ensure user backup directory exists
       const fs = require('fs-extra');
       fs.ensureDirSync(userDir);
