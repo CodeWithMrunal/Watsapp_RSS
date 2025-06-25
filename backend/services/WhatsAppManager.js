@@ -216,22 +216,27 @@ class WhatsAppManager {
     const chats = await this.client.getChats();
     
     // Process only groups in parallel with error handling
+    console.log('Chats received:', chats.map(c => c.name || '[No Name]'));
     const groups = await Promise.all(
-      chats
-        .filter(chat => chat.isGroup)
+      chats.filter(chat => chat?.isGroup)
         .map(async (group) => {
-          try {
-            return {
-              id: group.id._serialized,
-              name: group.name || 'Unnamed Group',
-              participantCount: group.participants?.length || 0,
-              lastMessage: group.lastMessage?.body?.substring(0, 50) || '',
-              timestamp: group.timestamp || 0
-            };
-          } catch (error) {
-            console.warn(`Error processing group ${group.name} for user ${this.userId}:`, error);
+        try {
+          if (!group?.id?._serialized) {
+            console.warn('⚠️ Skipping invalid group object:', group);
             return null;
           }
+
+          return {
+            id: group.id._serialized,
+            name: group.name || 'Unnamed Group',
+            participantCount: group.participants?.length || 0,
+            lastMessage: group.lastMessage?.body?.substring(0, 50) || '',
+            timestamp: group.timestamp || 0
+          };
+        } catch (error) {
+          console.warn(`Error processing group ${group.name}:`, error);
+          return null;
+        }
         })
     );
 

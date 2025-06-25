@@ -19,7 +19,6 @@
     "jsonwebtoken": "^9.0.2",
     "moment": "^2.29.4",
     "nodemailer": "^6.9.4",
-    "puppeteer": "^24.10.2",
     "qrcode": "^1.5.3",
     "rss": "^1.2.2",
     "sequelize": "^6.37.7",
