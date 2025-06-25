@@ -10,7 +10,7 @@ class WhatsAppManagerPool {
     this.managers = new Map(); // userId -> WhatsAppManager instance
     this.userSockets = new Map(); // userId -> Set of socket IDs
     this.initializationQueue = []; // Queue for initialization
-    this.isInitializing = false; // Flag to track if initialization is in progress
+    this.isProcessingQueue = false; // Flag to track if queue is being processed
     
     console.log('✅ WhatsAppManagerPool initialized');
   }
@@ -36,45 +36,50 @@ class WhatsAppManagerPool {
       
       this.managers.set(userId, manager);
       console.log(`✅ Created WhatsApp manager for user ${userId}`);
-      
-      // Add to initialization queue instead of initializing immediately
-      this.queueInitialization(manager, userId);
     }
     
     return this.managers.get(userId);
   }
 
   /**
-   * Queue initialization to prevent conflicts
+   * Initialize manager with queue
    */
-  async queueInitialization(manager, userId) {
-    this.initializationQueue.push({ manager, userId });
+  async initializeManager(userId) {
+    const manager = await this.getManager(userId);
     
-    // If not currently initializing, start processing queue
-    if (!this.isInitializing) {
-      this.processInitializationQueue();
+    // Add to queue if not already initializing
+    if (!manager.isInitializing && !manager.isReady) {
+      this.initializationQueue.push({ manager, userId });
+      
+      // Start processing queue if not already doing so
+      if (!this.isProcessingQueue) {
+        this.processInitializationQueue();
+      }
     }
+    
+    return manager;
   }
 
   /**
-   * Process initialization queue with delays
+   * Process initialization queue with proper spacing
    */
   async processInitializationQueue() {
     if (this.initializationQueue.length === 0) {
-      this.isInitializing = false;
+      this.isProcessingQueue = false;
       return;
     }
 
-    this.isInitializing = true;
+    this.isProcessingQueue = true;
     const { manager, userId } = this.initializationQueue.shift();
 
     try {
       console.log(`🔄 Processing initialization for user ${userId}`);
       
-      // Add delay before initialization to prevent Chrome conflicts
-      if (this.managers.size > 1) {
-        console.log(`⏳ Waiting 3 seconds before initializing user ${userId}...`);
-        await new Promise(resolve => setTimeout(resolve, 3000));
+      // Wait before initialization to avoid Chrome conflicts
+      const activeManagers = Array.from(this.managers.values()).filter(m => m.isInitializing).length;
+      if (activeManagers > 0) {
+        console.log(`⏳ Waiting ${5 * activeManagers} seconds before initializing user ${userId}...`);
+        await new Promise(resolve => setTimeout(resolve, 5000 * activeManagers));
       }
       
       // Initialize the manager
@@ -87,10 +92,10 @@ class WhatsAppManagerPool {
       });
     }
 
-    // Process next in queue
+    // Process next in queue after a delay
     setTimeout(() => {
       this.processInitializationQueue();
-    }, 1000); // Small delay between initializations
+    }, 2000);
   }
 
   /**
@@ -116,6 +121,9 @@ class WhatsAppManagerPool {
       } catch (error) {
         console.error(`Error destroying client for user ${userId}:`, error);
       }
+      
+      // Remove from queue if present
+      this.initializationQueue = this.initializationQueue.filter(item => item.userId !== userId);
       
       this.managers.delete(userId);
       console.log(`🗑️ Removed WhatsApp manager for user ${userId}`);
@@ -169,7 +177,7 @@ class WhatsAppManagerPool {
       `./backups/user_${userId}`,
       `./.wwebjs_auth/user_${userId}`,
       `./.wwebjs_auth/user_${userId}/session`,
-      `./.wwebjs_auth/user_${userId}/chrome-user-data`
+      `./.wwebjs_auth/user_${userId}/chrome-data-${userId}`
     ];
     
     dirs.forEach(dir => {
@@ -189,46 +197,6 @@ class WhatsAppManagerPool {
       backups: `./backups/user_${userId}`,
       auth: `./.wwebjs_auth/user_${userId}`
     };
-  }
-
-  /**
-   * Load saved session for a user
-   */
-  async loadUserSession(userId) {
-    try {
-      const session = await WhatsAppSession.findOne({
-        where: { user_id: userId, is_active: true }
-      });
-      
-      if (session && session.session_data) {
-        const manager = await this.getManager(userId);
-        // Session data would be used to restore WhatsApp connection
-        return true;
-      }
-      
-      return false;
-    } catch (error) {
-      console.error(`Error loading session for user ${userId}:`, error);
-      return false;
-    }
-  }
-
-  /**
-   * Save user session
-   */
-  async saveUserSession(userId, sessionData) {
-    try {
-      await WhatsAppSession.upsert({
-        user_id: userId,
-        session_data: JSON.stringify(sessionData),
-        is_active: true,
-        last_activity: new Date()
-      });
-      
-      console.log(`💾 Saved session for user ${userId}`);
-    } catch (error) {
-      console.error(`Error saving session for user ${userId}:`, error);
-    }
   }
 
   /**

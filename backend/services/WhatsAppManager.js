@@ -22,18 +22,27 @@ class WhatsAppManager {
     this.groupsCacheTime = null;
     this.CACHE_DURATION = 5 * 60 * 1000; // 5 minutes cache
     this.lastActivity = Date.now();
+    this.initializationAttempts = 0;
+    this.maxAttempts = 3;
   }
 
-  // Enhanced initialize method with better error handling
   async initialize() {
     console.log(`🔄 Initializing WhatsApp client for user ${this.userId}...`);
     
-    // If client already exists and is ready, don't reinitialize
+    // Check if already initializing or ready
+    if (this.isInitializing) {
+      console.log(`⏳ Already initializing for user ${this.userId}`);
+      return;
+    }
+    
     if (this.client && this.isReady) {
       console.log(`✅ Client already ready for user ${this.userId}`);
       return;
     }
     
+    this.isInitializing = true;
+    this.initializationAttempts++;
+
     // If client exists but not ready, destroy it first
     if (this.client) {
       console.log(`🗑️ Destroying existing client for user ${this.userId}...`);
@@ -54,11 +63,16 @@ class WhatsAppManager {
     this.groupsCacheTime = null;
 
     try {
-      // Create user-specific session path
-      const sessionPath = path.join(this.userDataPath.auth, 'session');
+      // Create user-specific paths
+      const authPath = path.join(this.userDataPath.auth, 'session');
+      const userDataDir = path.join(this.userDataPath.auth, `chrome-data-${this.userId}`);
       
-      // Simplified Puppeteer configuration for macOS
-      const puppeteerConfig = {
+      // Ensure directories exist
+      await fs.ensureDir(authPath);
+      await fs.ensureDir(userDataDir);
+      
+      // Use whatsapp-web.js bundled puppeteer configuration
+      const puppeteerOptions = {
         headless: true,
         args: [
           '--no-sandbox',
@@ -67,35 +81,68 @@ class WhatsAppManager {
           '--disable-accelerated-2d-canvas',
           '--no-first-run',
           '--no-zygote',
-          '--disable-gpu'
-        ]
+          '--disable-gpu',
+          '--disable-web-security',
+          '--disable-features=IsolateOrigins,site-per-process',
+          '--allow-running-insecure-content',
+          `--user-data-dir=${userDataDir}`
+        ],
+        // Don't specify executablePath - let whatsapp-web.js handle it
       };
 
-      // Remove executablePath to let Puppeteer find Chrome automatically
-      // This usually works better on macOS
+      // Only specify executablePath if Chrome is installed in standard location
+      if (process.platform === 'darwin' && fs.existsSync('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')) {
+        puppeteerOptions.executablePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+      }
       
       // Create new client with user-specific configuration
       this.client = new Client({
         authStrategy: new LocalAuth({
           clientId: `user_${this.userId}`,
-          dataPath: sessionPath
+          dataPath: authPath
         }),
-        puppeteer: puppeteerConfig,
-        // User-specific settings
+        puppeteer: puppeteerOptions,
+        qrMaxRetries: 5,
+        authTimeoutMs: 60000,
+        // Prevent session takeover
         takeoverOnConflict: false,
-        takeoverTimeoutMs: 0,
-        qrMaxRetries: 5
+        takeoverTimeoutMs: 0
       });
 
       this.setupEventHandlers();
       
-      // Initialize the client
+      // Initialize the client with timeout
+      const initTimeout = setTimeout(() => {
+        console.error(`❌ Initialization timeout for user ${this.userId}`);
+        this.handleInitializationError(new Error('Initialization timeout'));
+      }, 60000); // 60 second timeout
+
       await this.client.initialize();
+      clearTimeout(initTimeout);
+      
       console.log(`✅ WhatsApp client initialization started for user ${this.userId}`);
+      this.isInitializing = false;
       
     } catch (error) {
       console.error(`❌ Error initializing WhatsApp client for user ${this.userId}:`, error);
-      this.io.emit('error', { message: 'Failed to initialize WhatsApp client. Please check Chrome installation.' });
+      this.handleInitializationError(error);
+    }
+  }
+
+  handleInitializationError(error) {
+    this.isInitializing = false;
+    this.io.emit('error', { 
+      message: `Failed to initialize WhatsApp client: ${error.message}`,
+      retry: this.initializationAttempts < this.maxAttempts
+    });
+    
+    if (this.initializationAttempts < this.maxAttempts) {
+      console.log(`🔄 Retrying initialization for user ${this.userId} (attempt ${this.initializationAttempts}/${this.maxAttempts})`);
+      setTimeout(() => {
+        this.initialize();
+      }, 5000); // Retry after 5 seconds
+    } else {
+      console.error(`❌ Max initialization attempts reached for user ${this.userId}`);
       throw error;
     }
   }
@@ -117,12 +164,16 @@ class WhatsAppManager {
       console.log(`✅ WhatsApp client is ready for user ${this.userId}!`);
       this.isAuthenticated = true;
       this.isReady = true;
+      this.isInitializing = false;
+      this.initializationAttempts = 0; // Reset attempts on success
       this.lastActivity = Date.now();
       
       // Pre-fetch groups in background
-      this.prefetchGroups().catch(err => 
-        console.error(`Error pre-fetching groups for user ${this.userId}:`, err)
-      );
+      setTimeout(() => {
+        this.prefetchGroups().catch(err => 
+          console.error(`Error pre-fetching groups for user ${this.userId}:`, err)
+        );
+      }, 2000); // Delay to ensure stability
       
       this.io.emit('ready');
       this.io.emit('authenticated');
@@ -138,6 +189,7 @@ class WhatsAppManager {
       console.error(`❌ Authentication failed for user ${this.userId}:`, msg);
       this.isAuthenticated = false;
       this.isReady = false;
+      this.isInitializing = false;
       this.io.emit('auth_failure', msg);
     });
 
@@ -145,6 +197,7 @@ class WhatsAppManager {
       console.log(`🔌 WhatsApp client disconnected for user ${this.userId}:`, reason);
       this.isAuthenticated = false;
       this.isReady = false;
+      this.isInitializing = false;
       this.selectedGroup = null;
       this.selectedUser = null;
       this.messageHistory = [];
@@ -175,16 +228,7 @@ class WhatsAppManager {
         // Remove all event listeners first
         this.client.removeAllListeners();
         
-        // Try to logout first if authenticated
-        if (this.isAuthenticated && this.client.pupPage) {
-          try {
-            await this.client.logout();
-          } catch (error) {
-            console.warn(`⚠️ Could not logout user ${this.userId}:`, error);
-          }
-        }
-        
-        // Destroy the client
+        // Try to destroy the client
         await this.client.destroy();
         this.client = null;
       }
@@ -194,6 +238,7 @@ class WhatsAppManager {
       this.client = null;
       this.isAuthenticated = false;
       this.isReady = false;
+      this.isInitializing = false;
     }
   }
 
@@ -208,47 +253,52 @@ class WhatsAppManager {
     }
   }
 
-  // Optimized group fetching
+  // Optimized group fetching with error handling
   async fetchGroupsOptimized() {
     console.log(`📋 Fetching groups for user ${this.userId}...`);
     
+    if (!this.client || !this.isReady) {
+      throw new Error('Client not ready');
+    }
+    
     const startTime = Date.now();
-    const chats = await this.client.getChats();
     
-    // Process only groups in parallel with error handling
-    console.log('Chats received:', chats.map(c => c.name || '[No Name]'));
-    const groups = await Promise.all(
-      chats.filter(chat => chat?.isGroup)
-        .map(async (group) => {
-        try {
-          if (!group?.id?._serialized) {
-            console.warn('⚠️ Skipping invalid group object:', group);
-            return null;
-          }
+    try {
+      const chats = await this.client.getChats();
+      
+      // Process only groups in parallel with error handling
+      const groups = await Promise.all(
+        chats
+          .filter(chat => chat.isGroup)
+          .map(async (group) => {
+            try {
+              return {
+                id: group.id._serialized,
+                name: group.name || 'Unnamed Group',
+                participantCount: group.participants?.length || 0,
+                lastMessage: group.lastMessage?.body?.substring(0, 50) || '',
+                timestamp: group.timestamp || 0
+              };
+            } catch (error) {
+              console.warn(`Error processing group ${group.name} for user ${this.userId}:`, error);
+              return null;
+            }
+          })
+      );
 
-          return {
-            id: group.id._serialized,
-            name: group.name || 'Unnamed Group',
-            participantCount: group.participants?.length || 0,
-            lastMessage: group.lastMessage?.body?.substring(0, 50) || '',
-            timestamp: group.timestamp || 0
-          };
-        } catch (error) {
-          console.warn(`Error processing group ${group.name}:`, error);
-          return null;
-        }
-        })
-    );
-
-    const validGroups = groups.filter(g => g !== null);
-    const fetchTime = Date.now() - startTime;
-    console.log(`✅ Fetched ${validGroups.length} groups in ${fetchTime}ms for user ${this.userId}`);
-    
-    // Cache the results
-    this.groupsCache = validGroups;
-    this.groupsCacheTime = Date.now();
-    
-    return validGroups;
+      const validGroups = groups.filter(g => g !== null);
+      const fetchTime = Date.now() - startTime;
+      console.log(`✅ Fetched ${validGroups.length} groups in ${fetchTime}ms for user ${this.userId}`);
+      
+      // Cache the results
+      this.groupsCache = validGroups;
+      this.groupsCacheTime = Date.now();
+      
+      return validGroups;
+    } catch (error) {
+      console.error(`Error fetching chats for user ${this.userId}:`, error);
+      throw error;
+    }
   }
 
   async getGroups() {
@@ -272,7 +322,7 @@ class WhatsAppManager {
 
   // Add method to check if client is ready
   isClientReady() {
-    return this.isReady && this.isAuthenticated && this.client;
+    return this.isReady && this.isAuthenticated && this.client && !this.isInitializing;
   }
 
   // Rest of your methods remain the same...
@@ -440,6 +490,7 @@ class WhatsAppManager {
     return {
       authenticated: this.isAuthenticated,
       ready: this.isReady,
+      initializing: this.isInitializing,
       selectedGroup: this.selectedGroup?.name || null,
       selectedUser: this.selectedUser || null,
       cachedGroups: this.groupsCache?.length || 0

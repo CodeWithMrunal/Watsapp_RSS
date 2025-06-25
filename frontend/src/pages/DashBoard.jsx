@@ -7,6 +7,7 @@ import WhatsAppLogin from '../components/whatsapp/WhatsAppLogin';
 import GroupSelection from '../components/groups/GroupSelection';
 import UserFilter from '../components/filters/UserFilter';
 import MessageDisplay from '../components/messages/MessageDisplay';
+import MultiUserStatus from '../components/common/MultiUserStatus';
 
 const API_BASE = 'http://localhost:3001';
 
@@ -258,6 +259,8 @@ function DashboardPage() {
               {error}
             </Alert>
           )}
+
+          <MultiUserStatus socket={socket} />
 
           {selectedGroup && (
             <Alert variant="info" className="text-center">

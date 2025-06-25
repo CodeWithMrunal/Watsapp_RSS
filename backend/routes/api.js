@@ -184,8 +184,7 @@ function createApiRoutes(whatsappManagerPool) {
 
   router.post('/initialize', async (req, res) => {
     try {
-      const manager = await getManager(req);
-      await manager.initialize();
+      const manager = await whatsappManagerPool.initializeManager(req.userId);
       res.json({ success: true });
     } catch (error) {
       console.error('Error initializing WhatsApp manager:', error);

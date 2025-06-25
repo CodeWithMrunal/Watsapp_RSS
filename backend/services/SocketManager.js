@@ -44,12 +44,10 @@ class SocketManager {
           }
         });
         
-        // Handle QR code request
+        // Handle initialization request
         socket.on('request_qr', async () => {
           try {
-            if (!manager.isAuthenticated) {
-              await manager.initialize();
-            }
+            await this.whatsappManagerPool.initializeManager(socket.userId);
           } catch (error) {
             socket.emit('error', { message: 'Failed to initialize WhatsApp' });
           }
