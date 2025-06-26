@@ -26,6 +26,7 @@ function createApiRoutes(whatsappManagerPool) {
 
   router.get('/groups', async (req, res) => {
     console.log(`GET /api/groups for user ${req.userId}`);
+    const { refresh = false } = req.query;
     
     try {
       const manager = await getManager(req);
@@ -35,6 +36,11 @@ function createApiRoutes(whatsappManagerPool) {
           error: 'WhatsApp client is still initializing. Please wait a moment and try again.',
           status: manager.getStatus()
         });
+      }
+      
+      // Force refresh if requested
+      if (refresh === 'true') {
+        manager.refreshGroups();
       }
       
       const groups = await manager.getGroups();
@@ -64,6 +70,58 @@ function createApiRoutes(whatsappManagerPool) {
     }
   });
 
+// Add this safer groups endpoint as an alternative
+  router.get('/groups-safe', async (req, res) => {
+    console.log(`GET /api/groups-safe for user ${req.userId}`);
+    
+    try {
+      const manager = await getManager(req);
+      
+      if (!manager.isClientReady()) {
+        return res.status(503).json({ 
+          error: 'WhatsApp client is still initializing. Please wait a moment and try again.',
+          status: manager.getStatus()
+        });
+      }
+      
+      // Try to get groups from cache first
+      if (manager.groupsCache && manager.groupsCache.length > 0) {
+        console.log(`📦 Returning cached groups for user ${req.userId}`);
+        return res.json(manager.groupsCache);
+      }
+      
+      // If no cache, wait a bit and try to fetch
+      console.log(`⏳ Waiting for WhatsApp to stabilize for user ${req.userId}...`);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      try {
+        const groups = await manager.getGroups();
+        res.json(groups);
+      } catch (error) {
+        console.error('Error fetching groups, returning empty array:', error);
+        // Return empty array instead of error to prevent UI issues
+        res.json([]);
+        
+        // Try to fetch groups in background
+        setTimeout(async () => {
+          try {
+            console.log(`🔄 Background fetch attempt for user ${req.userId}`);
+            await manager.fetchGroupsOptimized();
+          } catch (e) {
+            console.error('Background fetch failed:', e);
+          }
+        }, 5000);
+      }
+      
+    } catch (error) {
+      console.error('Error in groups-safe endpoint:', error);
+      res.status(500).json({ 
+        error: error.message,
+        groups: [] // Always return an array
+      });
+    }
+  });
+  
   router.post('/select-group', async (req, res) => {
     console.log(`POST /api/select-group for user ${req.userId}`, req.body);
     const { groupId } = req.body;

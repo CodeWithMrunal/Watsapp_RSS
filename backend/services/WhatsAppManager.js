@@ -5,6 +5,8 @@ const path = require('path');
 const config = require('../config');
 const FileUtils = require('../utils/fileUtils');
 const MessageUtils = require('../utils/messageUtils');
+const WhatsAppStateChecker = require('./WhatsAppStateChecker');
+const WhatsAppLoadingManager = require('./WhatsAppLoadingManager');
 
 class WhatsAppManager {
   constructor(io, rssManager, userId, userDataPath) {
@@ -165,15 +167,38 @@ class WhatsAppManager {
       this.isAuthenticated = true;
       this.isReady = true;
       this.isInitializing = false;
-      this.initializationAttempts = 0; // Reset attempts on success
+      this.initializationAttempts = 0;
       this.lastActivity = Date.now();
       
-      // Pre-fetch groups in background
-      setTimeout(() => {
-        this.prefetchGroups().catch(err => 
-          console.error(`Error pre-fetching groups for user ${this.userId}:`, err)
-        );
-      }, 2000); // Delay to ensure stability
+      // Initialize loading manager for this user
+      WhatsAppLoadingManager.initializeUser(this.userId);
+      
+      // Start monitoring loading progress
+      WhatsAppLoadingManager.monitorLoadingProgress(this.client, this.userId, this.io);
+      
+      // Wait for WhatsApp to be FULLY ready before pre-fetching
+      setTimeout(async () => {
+        try {
+          const fullyReady = await WhatsAppStateChecker.waitForFullReady(this.client, 15000);
+          if (fullyReady) {
+            console.log(`🚀 WhatsApp fully loaded for user ${this.userId}, pre-fetching groups...`);
+            const groups = await this.prefetchGroups();
+            
+            // Emit event that groups are ready
+            if (groups && groups.length > 0) {
+              this.io.emit('whatsapp_fully_loaded', {
+                userId: this.userId,
+                groupCount: groups.length,
+                groups: groups.slice(0, 10)
+              });
+            }
+          } else {
+            console.log(`⚠️ WhatsApp not fully ready for user ${this.userId}, skipping pre-fetch`);
+          }
+        } catch (err) {
+          console.error(`Error during pre-fetch for user ${this.userId}:`, err);
+        }
+      }, 5000); // Wait 5 seconds after ready event
       
       this.io.emit('ready');
       this.io.emit('authenticated');
@@ -221,7 +246,7 @@ class WhatsAppManager {
     });
   }
 
-  // Gracefully destroy the client
+ // Gracefully destroy the client
   async destroy() {
     try {
       if (this.client) {
@@ -246,16 +271,40 @@ class WhatsAppManager {
   async prefetchGroups() {
     try {
       console.log(`🔄 Pre-fetching groups in background for user ${this.userId}...`);
-      const groups = await this.fetchGroupsOptimized();
-      console.log(`✅ Pre-fetched ${groups.length} groups for user ${this.userId}`);
+      
+      // Wait a bit for WhatsApp to fully load chats
+      let attempts = 0;
+      const maxAttempts = 10;
+      
+      while (attempts < maxAttempts) {
+        try {
+          const groups = await this.fetchGroupsOptimized();
+          
+          if (groups.length > 0) {
+            console.log(`✅ Pre-fetched ${groups.length} groups for user ${this.userId}`);
+            return groups;
+          }
+          
+          console.log(`⏳ No groups found yet for user ${this.userId}, waiting...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          attempts++;
+          
+        } catch (error) {
+          console.log(`⏳ WhatsApp still loading for user ${this.userId}: ${error.message}`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          attempts++;
+        }
+      }
+      
+      console.warn(`⚠️ Could not prefetch groups after ${maxAttempts} attempts for user ${this.userId}`);
+      
     } catch (error) {
       console.error(`Error pre-fetching groups for user ${this.userId}:`, error);
     }
   }
 
-  // Optimized group fetching with error handling
-  async fetchGroupsOptimized() {
-    console.log(`📋 Fetching groups for user ${this.userId}...`);
+  async fetchGroupsOptimized(retryCount = 0) {
+    console.log(`📋 Fetching groups for user ${this.userId}... (attempt ${retryCount + 1})`);
     
     if (!this.client || !this.isReady) {
       throw new Error('Client not ready');
@@ -264,60 +313,227 @@ class WhatsAppManager {
     const startTime = Date.now();
     
     try {
-      const chats = await this.client.getChats();
+      // Method 1: Try using the built-in getChats method first
+      const allChats = await this.client.getChats();
+      console.log(`📊 Found ${allChats.length} total chats for user ${this.userId}`);
       
-      // Process only groups in parallel with error handling
-      const groups = await Promise.all(
-        chats
-          .filter(chat => chat.isGroup)
-          .map(async (group) => {
-            try {
-              return {
-                id: group.id._serialized,
-                name: group.name || 'Unnamed Group',
-                participantCount: group.participants?.length || 0,
-                lastMessage: group.lastMessage?.body?.substring(0, 50) || '',
-                timestamp: group.timestamp || 0
-              };
-            } catch (error) {
-              console.warn(`Error processing group ${group.name} for user ${this.userId}:`, error);
-              return null;
-            }
-          })
-      );
-
-      const validGroups = groups.filter(g => g !== null);
+      // Filter for groups
+      const groups = allChats
+        .filter(chat => chat.isGroup)
+        .map(chat => ({
+          id: chat.id._serialized,
+          name: chat.name || 'Unnamed Group',
+          participantCount: chat.participants?.length || 0,
+          lastMessage: chat.lastMessage?.body?.substring(0, 50) || '',
+          timestamp: chat.timestamp || 0,
+          unreadCount: chat.unreadCount || 0
+        }));
+      
       const fetchTime = Date.now() - startTime;
-      console.log(`✅ Fetched ${validGroups.length} groups in ${fetchTime}ms for user ${this.userId}`);
+      console.log(`✅ Fetched ${groups.length} groups in ${fetchTime}ms for user ${this.userId}`);
+      
+      // Update loading manager with actual group count
+      if (typeof WhatsAppLoadingManager !== 'undefined' && WhatsAppLoadingManager.updateGroupCount) {
+        WhatsAppLoadingManager.updateGroupCount(this.userId, groups.length);
+      }
       
       // Cache the results
-      this.groupsCache = validGroups;
+      this.groupsCache = groups;
       this.groupsCacheTime = Date.now();
       
-      return validGroups;
+      return groups;
+      
     } catch (error) {
-      console.error(`Error fetching chats for user ${this.userId}:`, error);
-      throw error;
+      console.error(`Error with getChats method for user ${this.userId}:`, error.message);
+      
+      // Method 2: Fallback to page evaluation if getChats fails
+      try {
+        console.log(`🔄 Trying alternate method for user ${this.userId}...`);
+        
+        const groups = await this.client.pupPage.evaluate(() => {
+          try {
+            // Multiple ways to access the Store
+            const Store = window.Store || window.mR?.findModule('Chat')[0] || window.webpackChunkwhatsapp_web_client?.default?.Chat;
+            
+            if (!Store || !Store.Chat) {
+              console.error('Store.Chat not available');
+              return [];
+            }
+
+            // Get all chats
+            const allChats = Store.Chat.getModelsArray ? Store.Chat.getModelsArray() : Store.Chat.models || [];
+            console.log(`Found ${allChats.length} chats in Store`);
+            
+            // Filter and map groups
+            const groups = [];
+            for (const chat of allChats) {
+              try {
+                // Check if it's a group
+                if (chat && chat.isGroup === true) {
+                  groups.push({
+                    id: chat.id?._serialized || chat.id?.toString() || '',
+                    name: chat.name || chat.title || 'Unnamed Group',
+                    participantCount: chat.participants?.length || chat.participantCount || 0,
+                    lastMessage: chat.lastMessage?.body?.substring(0, 50) || '',
+                    timestamp: chat.timestamp || chat.t || 0,
+                    unreadCount: chat.unreadCount || 0
+                  });
+                }
+              } catch (e) {
+                console.error('Error processing chat:', e);
+              }
+            }
+            
+            console.log(`Filtered ${groups.length} groups from ${allChats.length} chats`);
+            return groups;
+          } catch (error) {
+            console.error('Error in evaluate:', error);
+            return [];
+          }
+        });
+        
+        const fetchTime = Date.now() - startTime;
+        console.log(`✅ Fetched ${groups.length} groups using fallback method in ${fetchTime}ms for user ${this.userId}`);
+        
+        // Cache the results
+        this.groupsCache = groups;
+        this.groupsCacheTime = Date.now();
+        
+        return groups;
+        
+      } catch (fallbackError) {
+        console.error(`Error with fallback method for user ${this.userId}:`, fallbackError.message);
+        
+        // If we have cached groups, return them
+        if (this.groupsCache && this.groupsCache.length > 0) {
+          console.log(`⚠️ Returning cached groups due to error for user ${this.userId}`);
+          return this.groupsCache;
+        }
+        
+        // If no cache and still failing after retries, return empty array
+        if (retryCount >= 2) {
+          console.warn(`⚠️ Could not fetch groups after ${retryCount + 1} attempts for user ${this.userId}`);
+          return [];
+        }
+        
+        // Retry with exponential backoff
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 5000);
+        console.log(`🔄 Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return this.fetchGroupsOptimized(retryCount + 1);
+      }
     }
   }
+// Add a method to get loading status
+  getLoadingStatus() {
+    return WhatsAppLoadingManager.getStatus(this.userId);
+  }
+
+  // Also update the ready event to ensure proper initialization
+  // setupEventHandlers() {
+  //   if (!this.client) return;
+
+  //   this.client.on('qr', async (qr) => {
+  //     console.log(`📱 QR Code received for user ${this.userId}`);
+  //     try {
+  //       const qrDataUrl = await qrcode.toDataURL(qr);
+  //       this.io.emit('qr', qrDataUrl);
+  //     } catch (err) {
+  //       console.error(`Error generating QR code for user ${this.userId}:`, err);
+  //     }
+  //   });
+
+  //   this.client.on('ready', async () => {
+  //     console.log(`✅ WhatsApp client is ready for user Yay ${this.userId}!`);
+  //     this.isAuthenticated = true;
+  //     this.isReady = true;
+  //     this.isInitializing = false;
+  //     this.initializationAttempts = 0;
+  //     this.lastActivity = Date.now();
+      
+  //     WhatsAppLoadingManager.initializeUser(this.userId);
+      
+  //     // Start monitoring loading progress
+  //     WhatsAppLoadingManager.monitorLoadingProgress(this.client, this.userId, this.io);
+      
+  //     // Wait for WhatsApp to be FULLY ready before pre-fetching
+  //     setTimeout(async () => {
+  //       try {
+  //         const fullyReady = await WhatsAppStateChecker.waitForFullReady(this.client, 15000);
+  //         if (fullyReady) {
+  //           console.log(`🚀 WhatsApp fully loaded for user ${this.userId}, pre-fetching groups...`);
+  //           await this.prefetchGroups();
+  //         } else {
+  //           console.log(`⚠️ WhatsApp not fully ready for user ${this.userId}, skipping pre-fetch`);
+  //         }
+  //       } catch (err) {
+  //         console.error(`Error during pre-fetch for user ${this.userId}:`, err);
+  //       }
+  //     }, 5000); // Wait 5 seconds after ready event
+      
+  //     this.io.emit('ready');
+  //     this.io.emit('authenticated');
+  //   });
+  // }
 
   async getGroups() {
+    console.log(`📋 Getting groups for user ${this.userId}...`);
+    
     // Check if client is ready
     if (!this.isReady || !this.client) {
       throw new Error('WhatsApp client not ready. Please wait a moment and try again.');
     }
     
+    // Clear cache if requested to force refresh
+    if (this.shouldRefreshGroups) {
+      this.groupsCache = null;
+      this.groupsCacheTime = null;
+      this.shouldRefreshGroups = false;
+    }
+    
     // Return cached groups if available and fresh
     if (this.groupsCache && this.groupsCacheTime) {
       const cacheAge = Date.now() - this.groupsCacheTime;
-      if (cacheAge < this.CACHE_DURATION) {
-        console.log(`📦 Returning cached groups for user ${this.userId}`);
+      if (cacheAge < this.CACHE_DURATION && this.groupsCache.length > 0) {
+        console.log(`📦 Returning ${this.groupsCache.length} cached groups for user ${this.userId}`);
         return this.groupsCache;
       }
     }
     
     // Fetch fresh groups
-    return await this.fetchGroupsOptimized();
+    try {
+      const groups = await this.fetchGroupsOptimized();
+      
+      // Emit event that groups are ready
+      if (groups.length > 0) {
+        this.io.emit('groups_fetched', {
+          count: groups.length,
+          userId: this.userId
+        });
+      }
+      
+      return groups;
+    } catch (error) {
+      console.error(`Error fetching groups for user ${this.userId}:`, error);
+      
+      // If fetch fails, return cached groups if available
+      if (this.groupsCache && this.groupsCache.length > 0) {
+        console.log(`⚠️ Using stale cache (${this.groupsCache.length} groups) due to fetch error for user ${this.userId}`);
+        return this.groupsCache;
+      }
+      
+      // If no cache, return empty array instead of throwing
+      console.warn(`⚠️ No groups available for user ${this.userId}`);
+      return [];
+    }
+  }
+
+  // Add method to force refresh groups
+  refreshGroups() {
+    console.log(`🔄 Forcing group refresh for user ${this.userId}`);
+    this.shouldRefreshGroups = true;
+    this.groupsCache = null;
+    this.groupsCacheTime = null;
   }
 
   // Add method to check if client is ready
@@ -486,17 +702,28 @@ class WhatsAppManager {
     }
   }
 
+// Update getStatus to include loading info
   getStatus() {
+    const loadingStatus = typeof WhatsAppLoadingManager !== 'undefined' 
+      ? WhatsAppLoadingManager.getStatus(this.userId) 
+      : { state: 'unknown', groupsFound: 0, isFullyLoaded: false };
+      
     return {
       authenticated: this.isAuthenticated,
       ready: this.isReady,
       initializing: this.isInitializing,
       selectedGroup: this.selectedGroup?.name || null,
       selectedUser: this.selectedUser || null,
-      cachedGroups: this.groupsCache?.length || 0
+      cachedGroups: this.groupsCache?.length || 0,
+      lastActivity: this.lastActivity,
+      loading: {
+        state: loadingStatus.state,
+        groupsLoaded: this.groupsCache?.length || loadingStatus.groupsFound || 0,
+        isFullyLoaded: loadingStatus.isFullyLoaded || (this.groupsCache?.length > 0),
+        estimatedTimeRemaining: loadingStatus.estimatedTimeRemaining
+      }
     };
   }
-
   get messageHistory() {
     return this._messageHistory || [];
   }
