@@ -7,3 +7,6 @@ media
 best_images
 discarded_images
 venv
+scripts
+data
+.DS_Store
