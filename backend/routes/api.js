@@ -70,6 +70,61 @@ function createApiRoutes(whatsappManagerPool) {
     }
   });
 
+  router.get('/api/groups', async (req, res) => {
+    try {
+      const manager = await req.whatsappManagerPool.getManager(req.userId);
+      
+      if (!manager || !manager.isClientReady()) {
+        return res.status(503).json({ 
+          error: 'WhatsApp not ready', 
+          needsReconnect: true 
+        });
+      }
+      
+      // Check if the client has been idle
+      const idleTime = Date.now() - manager.lastActivity;
+      const IDLE_THRESHOLD = 2 * 60 * 1000; // 2 minutes
+      
+      if (idleTime > IDLE_THRESHOLD) {
+        console.log(`⏳ Client was idle for ${Math.round(idleTime / 1000)}s, waiting for WhatsApp to stabilize...`);
+        
+        // Send a "preparing" status
+        res.status(202).json({ 
+          status: 'preparing',
+          message: 'WhatsApp is reconnecting. Please wait...',
+          retryAfter: 5000 
+        });
+        
+        // Update last activity
+        manager.lastActivity = Date.now();
+        
+        // Ensure WhatsApp is ready before next request
+        setTimeout(async () => {
+          try {
+            // Check if WhatsApp is still connected
+            const state = await manager.client.getState();
+            console.log(`WhatsApp state after idle: ${state}`);
+            
+            // Pre-warm the cache
+            await manager.fetchGroupsOptimized();
+          } catch (err) {
+            console.error('Error pre-warming cache:', err);
+          }
+        }, 1000);
+        
+        return;
+      }
+      
+      // Normal flow - get groups
+      const groups = await manager.getGroups();
+      res.json(groups);
+      
+    } catch (error) {
+      console.error('Error fetching groups:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
 // Add this safer groups endpoint as an alternative
   router.get('/groups-safe', async (req, res) => {
     console.log(`GET /api/groups-safe for user ${req.userId}`);

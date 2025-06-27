@@ -14,9 +14,31 @@ function GroupSelection({ onGroupSelected, onLogout, isReady, socket }) {
   const [canFetchGroups, setCanFetchGroups] = useState(false);
 
   useEffect(() => {
+    // Listen for fully loaded event
+    if (socket) {
+      const handleFullyLoaded = (data) => {
+        console.log('WhatsApp fully loaded event received:', data);
+        setIsWhatsAppLoading(false);
+        setCanFetchGroups(true);
+      };
+
+      socket.on('whatsapp_fully_loaded', handleFullyLoaded);
+
+      return () => {
+        socket.off('whatsapp_fully_loaded', handleFullyLoaded);
+      };
+    }
+  }, [socket]);
+
+  useEffect(() => {
     // Only fetch groups when WhatsApp is ready AND loaded
     if (isReady && canFetchGroups) {
       fetchGroups();
+    } else if (isReady && !canFetchGroups) {
+      // If ready but not loaded, check if groups are already available
+      setTimeout(() => {
+        fetchGroups();
+      }, 2000);
     }
   }, [isReady, canFetchGroups]);
 
@@ -27,11 +49,6 @@ function GroupSelection({ onGroupSelected, onLogout, isReady, socket }) {
   };
 
   const fetchGroups = async () => {
-    if (!canFetchGroups && !isWhatsAppLoading) {
-      setError('WhatsApp is still loading your chats. Please wait...');
-      return;
-    }
-
     setLoading(true);
     setError('');
     
@@ -42,6 +59,10 @@ function GroupSelection({ onGroupSelected, onLogout, isReady, socket }) {
       
       if (response.data.length === 0) {
         setError('No WhatsApp groups found. Make sure you\'re part of at least one group.');
+      } else {
+        // If we got groups, we're definitely loaded
+        setIsWhatsAppLoading(false);
+        setCanFetchGroups(true);
       }
     } catch (error) {
       if (error.response?.data?.error?.includes('still loading')) {
@@ -70,11 +91,7 @@ function GroupSelection({ onGroupSelected, onLogout, isReady, socket }) {
   };
 
   const handleRetry = () => {
-    if (canFetchGroups) {
-      fetchGroups();
-    } else {
-      setError('Please wait for WhatsApp to finish loading before retrying.');
-    }
+    fetchGroups();
   };
 
   const filteredGroups = groups.filter(group =>
@@ -96,8 +113,8 @@ function GroupSelection({ onGroupSelected, onLogout, isReady, socket }) {
     );
   }
 
-  // Show loading progress if WhatsApp is still loading
-  if (isWhatsAppLoading || !canFetchGroups) {
+  // Show loading progress if WhatsApp is still loading AND we haven't fetched groups yet
+  if (isWhatsAppLoading && groups.length === 0 && !loading) {
     return (
       <>
         <WhatsAppLoadingProgress 
@@ -133,7 +150,7 @@ function GroupSelection({ onGroupSelected, onLogout, isReady, socket }) {
   return (
     <>
       {/* Show loading progress even after groups are loaded */}
-      <WhatsAppLoadingProgress socket={socket} />
+      {socket && <WhatsAppLoadingProgress socket={socket} />}
       
       <Card className="group-selection-card">
         <Card.Header className="bg-primary text-white d-flex justify-content-between align-items-center">

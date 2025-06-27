@@ -231,6 +231,7 @@ class WhatsAppManager {
     });
 
     this.client.on('message', async (message) => {
+      this.lastActivity = Date.now(); // Update activity
       await this.handleIncomingMessage(message);
     });
 
@@ -282,6 +283,26 @@ class WhatsAppManager {
           
           if (groups.length > 0) {
             console.log(`✅ Pre-fetched ${groups.length} groups for user ${this.userId}`);
+            
+            // Update loading manager and emit events
+            if (typeof WhatsAppLoadingManager !== 'undefined') {
+              WhatsAppLoadingManager.markAsFullyLoaded(this.userId, groups.length);
+            }
+            
+            // Emit loading progress and fully loaded events
+            this.io.emit('loading_progress', {
+              groupsLoaded: groups.length,
+              totalGroups: groups.length,
+              isFullyLoaded: true,
+              state: 'ready',
+              estimatedTimeRemaining: null
+            });
+            
+            this.io.emit('whatsapp_fully_loaded', {
+              userId: this.userId,
+              groupsAvailable: groups.length
+            });
+            
             return groups;
           }
           
@@ -313,6 +334,26 @@ class WhatsAppManager {
     const startTime = Date.now();
     
     try {
+    // Add a delay on first attempt to ensure WhatsApp is ready
+    if (retryCount === 0) {
+      console.log(`⏳ Waiting for WhatsApp to stabilize...`);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+  }
+  catch(e){
+    console.log("abcd");
+  }
+    // Check if page is still active
+    try {
+      await this.client.pupPage.evaluate(() => {
+        return window.Store ? true : false;
+      });
+    } catch (e) {
+      console.log(`⚠️ Page evaluation failed, WhatsApp might be reloading`);
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+
+    try {
       // Method 1: Try using the built-in getChats method first
       const allChats = await this.client.getChats();
       console.log(`📊 Found ${allChats.length} total chats for user ${this.userId}`);
@@ -333,8 +374,19 @@ class WhatsAppManager {
       console.log(`✅ Fetched ${groups.length} groups in ${fetchTime}ms for user ${this.userId}`);
       
       // Update loading manager with actual group count
-      if (typeof WhatsAppLoadingManager !== 'undefined' && WhatsAppLoadingManager.updateGroupCount) {
+      if (typeof WhatsAppLoadingManager !== 'undefined') {
         WhatsAppLoadingManager.updateGroupCount(this.userId, groups.length);
+        
+        // If groups were found, mark as fully loaded
+        if (groups.length > 0) {
+          WhatsAppLoadingManager.markAsFullyLoaded(this.userId, groups.length);
+          
+          // Emit the fully loaded event
+          this.io.emit('whatsapp_fully_loaded', {
+            userId: this.userId,
+            groupsAvailable: groups.length
+          });
+        }
       }
       
       // Cache the results
@@ -394,6 +446,17 @@ class WhatsAppManager {
         
         const fetchTime = Date.now() - startTime;
         console.log(`✅ Fetched ${groups.length} groups using fallback method in ${fetchTime}ms for user ${this.userId}`);
+        
+        // Update loading manager
+        if (typeof WhatsAppLoadingManager !== 'undefined' && groups.length > 0) {
+          WhatsAppLoadingManager.markAsFullyLoaded(this.userId, groups.length);
+          
+          // Emit the fully loaded event
+          this.io.emit('whatsapp_fully_loaded', {
+            userId: this.userId,
+            groupsAvailable: groups.length
+          });
+        }
         
         // Cache the results
         this.groupsCache = groups;
@@ -476,6 +539,40 @@ class WhatsAppManager {
   //   });
   // }
 
+  async checkAndHandleIdleState() {
+    const idleTime = Date.now() - this.lastActivity;
+    const IDLE_THRESHOLD = 2 * 60 * 1000; // 2 minutes
+    
+    if (idleTime > IDLE_THRESHOLD) {
+      console.log(`⚠️ Client ${this.userId} was idle for ${Math.round(idleTime / 1000)}s`);
+      
+      // Check connection state
+      try {
+        const state = await this.client.getState();
+        console.log(`WhatsApp state for user ${this.userId}: ${state}`);
+        
+        if (state !== 'CONNECTED') {
+          console.log(`🔄 Reconnecting WhatsApp for user ${this.userId}...`);
+          // Wait for reconnection
+          await new Promise(resolve => setTimeout(resolve, 3000));
+        }
+        
+        // Clear cache to force fresh data
+        this.groupsCache = null;
+        this.groupsCacheTime = null;
+        
+        // Wait for WhatsApp to stabilize
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+      } catch (error) {
+        console.error(`Error checking state for user ${this.userId}:`, error);
+      }
+    }
+    
+    // Update last activity
+    this.lastActivity = Date.now();
+  }
+
   async getGroups() {
     console.log(`📋 Getting groups for user ${this.userId}...`);
     
@@ -483,6 +580,9 @@ class WhatsAppManager {
     if (!this.isReady || !this.client) {
       throw new Error('WhatsApp client not ready. Please wait a moment and try again.');
     }
+    
+    // Check and handle idle state
+    await this.checkAndHandleIdleState();
     
     // Clear cache if requested to force refresh
     if (this.shouldRefreshGroups) {
