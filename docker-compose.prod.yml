@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  backend:
+    image: yourusername/whatsapp-monitor-backend:latest
+    container_name: whatsapp-backend
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./data/rss:/app/rss
+      - ./data/media:/app/media
+      - ./data/backups:/app/backups
+      - ./data/session:/app/.wwebjs_auth
+      - ./data/cache:/app/.wwebjs_cache
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+    restart: unless-stopped
+    networks:
+      - whatsapp_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  selenium:
+    image: yourusername/whatsapp-monitor-selenium:latest
+    container_name: whatsapp-selenium
+    volumes:
+      - ./data/rss:/app/rss
+      - ./data/media:/app/media
+    environment:
+      - DISPLAY=:99
+      - DOCKER_ENV=true
+    restart: unless-stopped
+    networks:
+      - whatsapp_network
+    security_opt:
+      - seccomp:unconfined
+    shm_size: 2gb
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  frontend:
+    image: yourusername/whatsapp-monitor-frontend:latest
+    container_name: whatsapp-frontend
+    ports:
+      - "80:8080"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - whatsapp_network
+
+networks:
+  whatsapp_network:
+    driver: bridge

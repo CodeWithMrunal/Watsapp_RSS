@@ -386,3 +386,24 @@ WhatsApp Messages → WhatsAppManager → MessageUtils → RSSManager
 8. **File Organization** - Structured storage for all data types
 
 This backend provides a complete WhatsApp monitoring solution with real-time capabilities, media handling, RSS feed generation, and a clean API for frontend integration!
+
+# WhatsApp Monitor - Docker Edition
+
+A comprehensive WhatsApp monitoring application with automated link downloading capabilities.
+
+## Quick Start for End Users
+
+### Option 1: Use Pre-built Images (Recommended)
+
+```bash
+# 1. Create project directory
+mkdir whatsapp-monitor && cd whatsapp-monitor
+
+# 2. Download the production compose file
+curl -O https://raw.githubusercontent.com/yourusername/whatsapp-monitor/main/docker-compose.prod.yml
+
+# 3. Start the application
+DOCKER_USERNAME=yourusername make install
+
+ ### Option 2: Oneliner Install
+ docker run -d --name whatsapp-monitor -p 80:8080 -p 3001:3001 yourusername/whatsapp-monitor-frontend:latest

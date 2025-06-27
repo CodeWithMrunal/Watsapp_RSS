@@ -18,11 +18,21 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 class LinkDownloadManager:
-    def __init__(self, messages_file="rss/messages.json", media_file="media/links.json", download_dir="media"):
-        self.messages_file = Path(messages_file).resolve()
-        self.media_file = Path(media_file).resolve()
-        self.download_dir = Path(download_dir)
-        self.download_dir.mkdir(exist_ok=True)
+    def __init__(self, messages_file="backend/rss/messages.json", media_file="backend/media/links.json", download_dir="media"):
+        if os.getenv('DOCKER_ENV'):
+            # Inside Docker — use absolute paths (volume-mounted)
+            self.messages_file = Path('/app/rss/messages.json').resolve()
+            self.media_file = Path('/app/media/links.json').resolve()
+            self.download_dir = Path('/app/media')
+        else:
+            # Local dev — resolve paths relative to this script's location (selenium/)
+            base_dir = Path(__file__).resolve().parent.parent  # Go from selenium/ → project root
+            self.messages_file = (base_dir / messages_file).resolve()
+            self.media_file = (base_dir / media_file).resolve()
+            self.download_dir = (base_dir / download_dir).resolve()
+
+        # Make sure download directory exists
+        self.download_dir.mkdir(parents=True, exist_ok=True)
         
         # Track processed links to avoid duplicates
         self.processed_links = set()

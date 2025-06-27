@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: whatsapp-backend-dev
+    ports:
+      - "3001:3001"
+    volumes:
+      - shared_data:/app/rss
+      - shared_media:/app/media
+      - shared_backups:/app/backups
+      - whatsapp_session:/app/.wwebjs_auth
+      - whatsapp_cache:/app/.wwebjs_cache
+    environment:
+      - NODE_ENV=development
+      - PORT=3001
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+    restart: unless-stopped
+    networks:
+      - whatsapp_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  selenium:
+    build:
+      context: ./selenium
+      dockerfile: Dockerfile
+    container_name: whatsapp-selenium-dev
+    volumes:
+      - shared_data:/app/rss
+      - shared_media:/app/media
+    environment:
+      - DISPLAY=:99
+      - DOCKER_ENV=true
+    restart: unless-stopped
+    networks:
+      - whatsapp_network
+    security_opt:
+      - seccomp:unconfined
+    shm_size: 2gb
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: whatsapp-frontend-dev
+    ports:
+      - "8080:8080"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - whatsapp_network
+
+volumes:
+  shared_data:
+    driver: local
+  shared_media:
+    driver: local
+  shared_backups:
+    driver: local
+  whatsapp_session:
+    driver: local
+  whatsapp_cache:
+    driver: local
+
+networks:
+  whatsapp_network:
+    driver: bridge
