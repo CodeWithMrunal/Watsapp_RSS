@@ -916,53 +916,74 @@ def main():
     print("🔍 Processing existing links...")
     download_manager.process_new_links(force=True)
     
-    # Ask user for monitoring method
-    use_polling = input("\nUse polling mode instead of file watching? (y/n, default: n): ").strip().lower()
+    # Auto-detect environment and choose monitoring method
+    import os
     
-    if use_polling in ['y', 'yes', '1', 'true']:
-        # Use polling mode
-        print("\n🔄 Starting polling mode...")
+    if os.getenv('DOCKER_ENV'):
+        # Docker environment - use polling mode automatically
+        print("\n🐳 Docker environment detected - using polling mode")
         poll_interval = 10  # Check every 10 seconds
         monitor = PollingMonitor(download_manager, poll_interval)
         monitor.start()
         
-        print(f"🟢 Polling every {poll_interval} seconds. Press Ctrl+C to stop.")
+        print(f"🟢 Polling every {poll_interval} seconds in Docker.")
+        print("Container will run continuously...")
         
         try:
             while True:
-                time.sleep(1)
+                time.sleep(30)  # Sleep longer in Docker
+                print(f"📊 Status check - {datetime.now().strftime('%H:%M:%S')}")
         except KeyboardInterrupt:
             print("\n🛑 Stopping polling...")
             monitor.stop()
     else:
-        # Use file watching mode
-        print("\n👀 Starting file watching mode...")
-        event_handler = MessagesFileHandler(download_manager)
-        observer = Observer()
+        # Local development - ask user for preference
+        use_polling = input("\nUse polling mode instead of file watching? (y/n, default: n): ").strip().lower()
         
-        # Watch the directory containing messages.json
-        watch_path = download_manager.messages_file.parent
-        observer.schedule(event_handler, path=str(watch_path), recursive=False)
-        observer.start()
-        
-        print(f"🟢 Watching {watch_path} for changes. Press Ctrl+C to stop.")
-        
-        # Also start a background polling as backup
-        backup_monitor = PollingMonitor(download_manager, 30)  # Check every 30 seconds as backup
-        backup_monitor.start()
-        
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("\n🛑 Stopping monitoring...")
-            observer.stop()
-            backup_monitor.stop()
-        
-        observer.join()
+        if use_polling in ['y', 'yes', '1', 'true']:
+            # Use polling mode
+            print("\n🔄 Starting polling mode...")
+            poll_interval = 10  # Check every 10 seconds
+            monitor = PollingMonitor(download_manager, poll_interval)
+            monitor.start()
+            
+            print(f"🟢 Polling every {poll_interval} seconds. Press Ctrl+C to stop.")
+            
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\n🛑 Stopping polling...")
+                monitor.stop()
+        else:
+            # Use file watching mode
+            print("\n👀 Starting file watching mode...")
+            event_handler = MessagesFileHandler(download_manager)
+            observer = Observer()
+            
+            # Watch the directory containing messages.json
+            watch_path = download_manager.messages_file.parent
+            observer.schedule(event_handler, path=str(watch_path), recursive=False)
+            observer.start()
+            
+            print(f"🟢 Watching {watch_path} for changes. Press Ctrl+C to stop.")
+            
+            # Also start a background polling as backup
+            backup_monitor = PollingMonitor(download_manager, 30)  # Check every 30 seconds as backup
+            backup_monitor.start()
+            
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\n🛑 Stopping monitoring...")
+                observer.stop()
+                backup_monitor.stop()
+            
+            observer.join()
     
     download_manager.cleanup()
-    print("👋 Goodbye!")
+    print("👋 Service stopped!")
     
 if __name__ == "__main__":
     import sys

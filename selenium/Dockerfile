@@ -1,3 +1,4 @@
+# Fixed Selenium Dockerfile - Updated ChromeDriver Installation
 FROM python:3.11-slim
 
 # Install system dependencies
@@ -16,13 +17,20 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
     && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
-# Install ChromeDriver
-RUN CHROME_VERSION=$(google-chrome --version | cut -d " " -f3 | cut -d "." -f1) && \
-    CHROMEDRIVER_VERSION=$(curl -sS chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}) && \
-    wget -O /tmp/chromedriver.zip "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip" && \
-    unzip /tmp/chromedriver.zip -d /usr/local/bin/ && \
+# Install ChromeDriver using the new Chrome for Testing endpoints
+RUN CHROME_VERSION=$(google-chrome --version | cut -d " " -f3) && \
+    echo "Chrome version: $CHROME_VERSION" && \
+    # Use the new Chrome for Testing API
+    CHROMEDRIVER_VERSION=$(curl -sS "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_STABLE") && \
+    echo "ChromeDriver version: $CHROMEDRIVER_VERSION" && \
+    # Download ChromeDriver from the new location
+    wget -O /tmp/chromedriver.zip "https://storage.googleapis.com/chrome-for-testing-public/${CHROMEDRIVER_VERSION}/linux64/chromedriver-linux64.zip" && \
+    # Extract and install
+    unzip /tmp/chromedriver.zip -d /tmp/ && \
+    mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/ && \
     chmod +x /usr/local/bin/chromedriver && \
-    rm /tmp/chromedriver.zip
+    # Cleanup
+    rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64
 
 WORKDIR /app
 
@@ -51,4 +59,4 @@ HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
   CMD python -c "import os; exit(0 if os.path.exists('/app/rss') else 1)"
 
 # Wait for backend and start
-CMD ["sh", "-c", "sleep 15 && python sele_vd_downloader3.py"]
+CMD ["sh", "-c", "sleep 15 && python -u sele_vd_downloader3.py"]

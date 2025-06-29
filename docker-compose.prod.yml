@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   backend:
-    image: yourusername/whatsapp-monitor-backend:latest
+    image: pes2ug22cs323/whatsapp-monitor-backend:latest
     container_name: whatsapp-backend
     ports:
       - "3001:3001"
@@ -27,7 +27,7 @@ services:
       start_period: 40s
 
   selenium:
-    image: yourusername/whatsapp-monitor-selenium:latest
+    image: pes2ug22cs323/whatsapp-monitor-selenium:latest
     container_name: whatsapp-selenium
     volumes:
       - ./data/rss:/app/rss
@@ -46,7 +46,7 @@ services:
         condition: service_healthy
 
   frontend:
-    image: yourusername/whatsapp-monitor-frontend:latest
+    image: pes2ug22cs323/whatsapp-monitor-frontend:latest
     container_name: whatsapp-frontend
     ports:
       - "80:8080"
