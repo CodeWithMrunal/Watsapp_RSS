@@ -4,7 +4,7 @@ const config = {
   server: {
     port: process.env.PORT || 3001,
     cors: {
-      origin: "http://localhost:5173",
+      origin: ["http://localhost:5173","http://localhost:8080","http://localhost:3000"],
       methods: ["GET", "POST"]
     }
   },
@@ -17,23 +17,29 @@ const config = {
   
   whatsapp: {
   puppeteer: {
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process',
-      '--disable-gpu',
-      '--disable-web-security',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--shm-size=3gb' // Increase shared memory size for video handling
-    ],
-    defaultViewport: null,
-    timeout: 60000 // Increase timeout
-  }
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-web-security',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--single-process',
+        '--disable-extensions',
+        '--disable-default-apps',
+        '--disable-background-mode',
+        '--disable-sync',
+        '--disable-translate',
+        '--disable-plugins',
+        '--user-data-dir=/tmp/chrome-profile-' + Date.now(), // Unique profile per restart
+        '--remote-debugging-port=9222'
+      ],
+      defaultViewport: null,
+      timeout: 60000,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium'
+    }
 },
   
   rss: {
