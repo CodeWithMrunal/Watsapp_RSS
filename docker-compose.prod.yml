@@ -15,7 +15,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium  # FIXED: Correct Chrome path
+      # - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium  # FIXED: Correct Chrome path
       - CORS_ORIGIN=http://localhost  # Added for proper frontend connection
     restart: unless-stopped
     networks:

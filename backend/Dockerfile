@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Set environment variable for Puppeteer Core
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Set working directory
 WORKDIR /app
