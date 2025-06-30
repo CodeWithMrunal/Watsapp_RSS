@@ -38,7 +38,7 @@ const config = {
       ],
       defaultViewport: null,
       timeout: 60000,
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium'
+      // executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium'
     }
 },
   
