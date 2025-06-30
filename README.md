@@ -407,3 +407,23 @@ DOCKER_USERNAME=yourusername make install
 
  ### Option 2: Oneliner Install
  docker run -d --name whatsapp-monitor -p 80:8080 -p 3001:3001 yourusername/whatsapp-monitor-frontend:latest
+
+
+ # For other users:
+ ### 1. Create project directory
+mkdir whatsapp-monitor
+cd whatsapp-monitor
+
+### 2. Create data directories  
+mkdir -p data/{rss,media,backups,session,cache}
+
+### 3. Download compose file
+curl -O https://github.com/inmobi-glance/WhatsApp_Monitor/blob/single-instance/docker-compose.prod.yml
+
+
+### 4. Start the application
+docker-compose -f docker-compose.prod.yml up -d
+
+### 5. Access the application
+open http://localhost  ### macOS
+### or visit http://localhost in any browser
