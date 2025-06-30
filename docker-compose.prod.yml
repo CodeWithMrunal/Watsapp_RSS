@@ -15,10 +15,15 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium  # FIXED: Correct Chrome path
+      - CORS_ORIGIN=http://localhost  # Added for proper frontend connection
     restart: unless-stopped
     networks:
       - whatsapp_network
+    # ADDED: Security options for Chrome to work
+    security_opt:
+      - seccomp:unconfined
+    shm_size: 2gb
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
       interval: 30s
@@ -49,7 +54,7 @@ services:
     image: pes2ug22cs323/whatsapp-monitor-frontend:latest
     container_name: whatsapp-frontend
     ports:
-      - "80:8080"
+      - "80:8080"  # Users access via port 80 (standard web port)
     depends_on:
       - backend
     restart: unless-stopped

@@ -4,7 +4,7 @@ const config = {
   server: {
     port: process.env.PORT || 3001,
     cors: {
-      origin: ["http://localhost:5173","http://localhost:8080","http://localhost:3000"],
+      origin: true,
       methods: ["GET", "POST"]
     }
   },
