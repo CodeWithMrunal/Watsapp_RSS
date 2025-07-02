@@ -29,3 +29,4 @@ docker-compose.install.yml
 pycache/
 *.pyc
 *.pyo
+session-data.json

@@ -53,9 +53,6 @@ class WhatsAppMonitorServer {
     this.app.use(cors());
     this.app.use(express.json());
     
-    // Serve static files from public directory
-    this.app.use(express.static(path.join(__dirname, 'public')));
-
     // Enhanced static file serving with better caching
     this.app.use('/rss', express.static(path.join(__dirname, 'rss'), {
       maxAge: '5m', // Cache RSS files for 5 minutes
@@ -270,46 +267,45 @@ class WhatsAppMonitorServer {
   }
 
   // Enhanced graceful shutdown
-  shutdown() {
+  async shutdown() {
     console.log('\n🛑 Initiating graceful shutdown...');
     
     const shutdownTimeout = setTimeout(() => {
       console.log('⏰ Shutdown timeout reached, forcing exit');
       process.exit(1);
-    }, 10000); // 10 second timeout
+    }, 15000); // 15 second timeout
     
-    // Close server first
-    this.server.close(async () => {
-      console.log('🌐 HTTP server closed');
+    try {
+      // Cleanup WhatsApp manager first (most important)
+      if (this.whatsappManager) {
+        console.log('📱 Cleaning up WhatsApp manager...');
+        await this.whatsappManager.cleanup();
+        console.log('✅ WhatsApp manager cleaned up');
+      }
       
-      try {
-        // Close WhatsApp client
-        if (this.whatsappManager && this.whatsappManager.client) {
-          console.log('📱 Closing WhatsApp client...');
-          await this.whatsappManager.client.destroy();
-          console.log('✅ WhatsApp client closed');
-        }
-        
-        // Close Socket.IO
-        if (this.io) {
-          console.log('📡 Closing WebSocket server...');
-          this.io.close();
-          console.log('✅ WebSocket server closed');
-        }
-        
+      // Close Socket.IO
+      if (this.io) {
+        console.log('📡 Closing WebSocket server...');
+        this.io.close();
+        console.log('✅ WebSocket server closed');
+      }
+      
+      // Close HTTP server
+      this.server.close(() => {
+        console.log('🌐 HTTP server closed');
         clearTimeout(shutdownTimeout);
         console.log('✅ Graceful shutdown completed');
         process.exit(0);
-        
-      } catch (error) {
-        console.error('❌ Error during shutdown:', error);
-        clearTimeout(shutdownTimeout);
-        process.exit(1);
-      }
-    });
-    
-    // Stop accepting new connections
-    this.server.closeAllConnections?.();
+      });
+      
+      // Force close all connections
+      this.server.closeAllConnections?.();
+      
+    } catch (error) {
+      console.error('❌ Error during shutdown:', error);
+      clearTimeout(shutdownTimeout);
+      process.exit(1);
+    }
   }
 }
 
