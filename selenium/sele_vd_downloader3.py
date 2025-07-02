@@ -18,7 +18,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 class LinkDownloadManager:
-    def __init__(self, messages_file="backend/rss/messages.json", media_file="backend/media/links.json", download_dir="media"):
+    def __init__(self, messages_file="backend/rss/messages.json", media_file="backend/media/links.json", download_dir="backend/media"):
         if os.getenv('DOCKER_ENV'):
             # Inside Docker — use absolute paths (volume-mounted)
             self.messages_file = Path('/app/rss/messages.json').resolve()
@@ -344,7 +344,7 @@ class LinkDownloadManager:
 
 
 class SeleniumVideoDownloader:
-    def __init__(self, download_dir="media", headless=True):
+    def __init__(self, download_dir="backend/media", headless=True):
         self.download_dir = Path(download_dir).resolve()
         self.download_dir.mkdir(exist_ok=True)
         self.headless = headless
