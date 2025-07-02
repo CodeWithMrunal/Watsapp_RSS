@@ -20,12 +20,24 @@ class WhatsAppManager {
     this.groupsCacheTime = null;
     this.CACHE_DURATION = 5 * 60 * 1000; // 5 minutes cache
     
-    // Session persistence settings
-    this.sessionPath = path.join(__dirname, '../.wwebjs_auth');
-    this.sessionDataPath = path.join(__dirname, '../session-data.json');
-    this.autoReconnectAttempts = 0;
-    this.maxReconnectAttempts = 3;
-    this.reconnectDelay = 5000; // 5 seconds
+    // CRITICAL DEBUG: Let's see what's happening with paths
+    console.log('🔍 DEBUG: Current working directory:', process.cwd());
+    console.log('🔍 DEBUG: __dirname:', __dirname);
+    
+    // Session persistence settings - Try different path approaches
+    this.sessionPath = path.resolve('./.wwebjs_auth');  // Relative to working directory
+    this.sessionDataPath = path.resolve('./session-data.json');
+    
+    // Alternative absolute paths (comment out one set or the other to test)
+    // this.sessionPath = path.join(process.cwd(), '.wwebjs_auth');
+    // this.sessionDataPath = path.join(process.cwd(), 'session-data.json');
+    
+    console.log('📂 DEBUG: Session paths:', {
+      sessionPath: this.sessionPath,
+      sessionDataPath: this.sessionDataPath,
+      sessionPathExists: fs.existsSync(this.sessionPath),
+      sessionDataExists: fs.existsSync(this.sessionDataPath)
+    });
     
     // Initialize session data
     this.loadSessionData();
@@ -54,6 +66,8 @@ class WhatsAppManager {
         if (this.selectedGroup) {
           console.log(`🎯 Previously selected group: ${this.selectedGroup.name}`);
         }
+      } else {
+        console.log('📂 No previous session data found - this is normal for first run');
       }
     } catch (error) {
       console.warn('⚠️ Could not load session data:', error.message);
@@ -73,15 +87,67 @@ class WhatsAppManager {
       };
       
       fs.writeFileSync(this.sessionDataPath, JSON.stringify(sessionData, null, 2));
-      console.log('💾 Session data saved');
+      console.log('💾 Session data saved to:', this.sessionDataPath);
     } catch (error) {
       console.warn('⚠️ Could not save session data:', error.message);
     }
   }
 
-  // Enhanced initialize method with better session handling
+  // ENHANCED DEBUG: Initialize method with extensive logging
   initialize() {
     console.log('🔄 Initializing WhatsApp client...');
+    console.log('📂 Checking for existing WhatsApp session...');
+    
+    // Check current working directory
+    console.log('📍 Current working directory:', process.cwd());
+    
+    // Check if session exists BEFORE creating client
+    const sessionExists = fs.existsSync(this.sessionPath);
+    console.log('📱 Session directory exists:', sessionExists);
+    console.log('📱 Session path:', this.sessionPath);
+    
+    if (sessionExists) {
+      console.log('🔍 Found existing session directory!');
+      try {
+        const sessionContents = fs.readdirSync(this.sessionPath, { withFileTypes: true });
+        console.log('📁 Session directory contents:');
+        sessionContents.forEach(item => {
+          console.log(`   ${item.isDirectory() ? '📁' : '📄'} ${item.name}`);
+        });
+        
+        // Check for the specific session folder that should contain Chrome data
+        const sessionFolders = sessionContents.filter(item => 
+          item.isDirectory() && item.name.startsWith('session')
+        );
+        
+        if (sessionFolders.length > 0) {
+          console.log('✅ Found session folders:', sessionFolders.map(f => f.name));
+          
+          // Check what's inside the session folder
+          const sessionFolder = sessionFolders[0];
+          const sessionFolderPath = path.join(this.sessionPath, sessionFolder.name);
+          const sessionFolderContents = fs.readdirSync(sessionFolderPath);
+          console.log(`📂 Contents of ${sessionFolder.name}:`, sessionFolderContents.slice(0, 10)); // First 10 items
+          
+          // Check for critical Chrome profile files
+          const criticalFiles = ['Default', 'Local State', 'Preferences'];
+          const foundFiles = criticalFiles.filter(file => 
+            sessionFolderContents.includes(file)
+          );
+          console.log('🔍 Critical Chrome files found:', foundFiles);
+          
+          if (foundFiles.length === 0) {
+            console.log('⚠️ WARNING: No critical Chrome profile files found - session may be corrupted');
+          }
+        } else {
+          console.log('⚠️ WARNING: Session directory exists but no session folders found');
+        }
+      } catch (err) {
+        console.warn('⚠️ Could not read session directory:', err.message);
+      }
+    } else {
+      console.log('📂 No existing session directory found - first time setup');
+    }
     
     // If client already exists, destroy it first
     if (this.client) {
@@ -96,96 +162,150 @@ class WhatsAppManager {
     // Reset connection state (but keep session data)
     this.isAuthenticated = false;
     this.isReady = false;
-    this.autoReconnectAttempts = 0;
 
-    // Create new client with enhanced LocalAuth settings
-    this.client = new Client({
-      authStrategy: new LocalAuth({
-        clientId: 'whatsapp-monitor', // Unique client ID for session
-        dataPath: this.sessionPath // Custom path for session data
-      }),
-      puppeteer: {
-        ...config.whatsapp.puppeteer,
-        args: [
-          ...(config.whatsapp.puppeteer.args || []),
-          '--disable-gpu',
-          '--disable-dev-shm-usage',
-          '--disable-setuid-sandbox',
-          '--no-first-run',
-          '--no-sandbox',
-          '--no-zygote',
-          '--single-process',
-          '--disable-accelerated-2d-canvas',
-          '--disable-web-security',
-          '--disable-features=TranslateUI',
-          '--disable-ipc-flooding-protection',
-          '--disable-background-timer-throttling',
-          '--disable-backgrounding-occluded-windows',
-          '--disable-renderer-backgrounding'
-        ]
-      },
-      // Enhanced client settings for better session persistence
-      takeoverOnConflict: true,
-      takeoverTimeoutMs: 10000,
-      qrMaxRetries: 5,
-      restartOnAuthFail: true,
-      // Add session-specific settings
-      session: 'whatsapp-monitor-session'
+    // ENHANCED DEBUG: Create LocalAuth with extensive logging
+    console.log('🔧 Creating LocalAuth strategy...');
+    const clientId = 'whatsapp-monitor-session';
+    
+    console.log('📋 LocalAuth configuration:');
+    console.log('   - clientId:', clientId);
+    console.log('   - dataPath:', this.sessionPath);
+    
+    const authStrategy = new LocalAuth({
+      clientId: clientId,
+      dataPath: this.sessionPath
     });
+
+    console.log('✅ LocalAuth strategy created');
+
+    // MINIMAL Puppeteer configuration to avoid conflicts
+    const puppeteerConfig = {
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox'
+      ]
+      // Remove ALL other args that might cause issues
+    };
+
+    console.log('🔧 Creating WhatsApp Client...');
+    console.log('📋 Client configuration:');
+    console.log('   - authStrategy: LocalAuth with clientId', clientId);
+    console.log('   - puppeteer headless:', puppeteerConfig.headless);
+    console.log('   - puppeteer args:', puppeteerConfig.args);
+
+    this.client = new Client({
+      authStrategy: authStrategy,
+      puppeteer: puppeteerConfig,
+      // Remove all other options that might interfere
+    });
+
+    console.log('✅ WhatsApp Client created');
 
     this.setupEventHandlers();
     
     // Initialize the client
-    this.client.initialize();
-    console.log('✅ WhatsApp client initialization started');
+    console.log('🚀 Starting WhatsApp client initialization...');
+    console.log('⏳ Please wait - checking for existing session...');
     
-    // Save session data periodically
-    this.startPeriodicSave();
-  }
-
-  // Start periodic session data saving
-  startPeriodicSave() {
-    // Save session data every 5 minutes
-    this.saveInterval = setInterval(() => {
-      if (this.isReady) {
-        this.saveSessionData();
-      }
-    }, 5 * 60 * 1000);
-  }
-
-  // Stop periodic saving
-  stopPeriodicSave() {
-    if (this.saveInterval) {
-      clearInterval(this.saveInterval);
-    }
+    this.client.initialize();
   }
 
   setupEventHandlers() {
-    // QR Code event
+    // QR Code event - with enhanced logging
     this.client.on('qr', (qr) => {
-      console.log('📱 QR Code received - Please scan to authenticate');
+      console.log('📱 QR Code received - This means session restoration FAILED');
+      console.log('🔍 Reasons for QR code request:');
+      console.log('   1. First time setup (expected)');
+      console.log('   2. Session directory empty or corrupted');
+      console.log('   3. WhatsApp session expired (rare)');
+      console.log('   4. Chrome profile corrupted');
+      
+      // Check session directory again when QR is requested
+      const sessionExists = fs.existsSync(this.sessionPath);
+      console.log('📂 Session directory exists when QR requested:', sessionExists);
+      
+      if (sessionExists) {
+        try {
+          const contents = fs.readdirSync(this.sessionPath);
+          console.log('📁 Session directory contents when QR requested:', contents);
+        } catch (err) {
+          console.log('❌ Cannot read session directory:', err.message);
+        }
+      }
+      
       qrcode.toDataURL(qr, (err, url) => {
         if (err) {
           console.error('Error generating QR code:', err);
           return;
         }
+        console.log('📱 QR Code generated successfully');
         this.io.emit('qr', url);
       });
     });
 
-    // Authentication events
+    // Loading screen - helps debug what's happening
+    this.client.on('loading_screen', (percent, message) => {
+      console.log(`⏳ Loading: ${percent}% - ${message}`);
+      this.io.emit('loading_progress', { percent, message });
+    });
+
+    // Authentication events with enhanced logging
     this.client.on('authenticated', () => {
-      console.log('🔐 WhatsApp client authenticated');
+      console.log('🔐 WhatsApp client authenticated successfully!');
+      console.log('💾 Session should now be saved to:', this.sessionPath);
+      
+      // Check if session was actually created
+      setTimeout(() => {
+        const sessionExists = fs.existsSync(this.sessionPath);
+        console.log('📂 Session directory exists after authentication:', sessionExists);
+        
+        if (sessionExists) {
+          try {
+            const contents = fs.readdirSync(this.sessionPath);
+            console.log('📁 Session directory contents after auth:', contents);
+          } catch (err) {
+            console.log('❌ Cannot read session after auth:', err.message);
+          }
+        }
+      }, 2000); // Check after 2 seconds
+      
       this.isAuthenticated = true;
-      this.autoReconnectAttempts = 0; // Reset reconnect attempts
       this.io.emit('authenticated');
     });
 
-    // Ready event - most important for session persistence
+    // Ready event with enhanced logging
     this.client.on('ready', async () => {
       console.log('✅ WhatsApp client is ready!');
       this.isReady = true;
-      this.autoReconnectAttempts = 0;
+      
+      // Final check of session directory
+      const sessionExists = fs.existsSync(this.sessionPath);
+      console.log('💾 Final session check - directory exists:', sessionExists);
+      
+      if (sessionExists) {
+        try {
+          const contents = fs.readdirSync(this.sessionPath, { withFileTypes: true });
+          console.log('📁 Final session directory structure:');
+          contents.forEach(item => {
+            if (item.isDirectory()) {
+              console.log(`   📁 ${item.name}/`);
+              try {
+                const subContents = fs.readdirSync(path.join(this.sessionPath, item.name));
+                console.log(`      Files: ${subContents.length} items`);
+              } catch (e) {
+                console.log(`      Cannot read subdirectory: ${e.message}`);
+              }
+            } else {
+              console.log(`   📄 ${item.name}`);
+            }
+          });
+        } catch (err) {
+          console.log('❌ Cannot read final session:', err.message);
+        }
+      } else {
+        console.log('❌ CRITICAL: Session directory does not exist after ready!');
+      }
       
       // Save session data immediately when ready
       this.saveSessionData();
@@ -214,11 +334,18 @@ class WhatsAppManager {
     // Enhanced authentication failure handling
     this.client.on('auth_failure', (msg) => {
       console.error('❌ Authentication failed:', msg);
+      console.log('🔍 Possible reasons:');
+      console.log('   1. Session files corrupted');
+      console.log('   2. WhatsApp session expired');
+      console.log('   3. Phone disconnected from internet');
+      console.log('   4. Chrome profile corruption');
+      
+      // Check session state during auth failure
+      const sessionExists = fs.existsSync(this.sessionPath);
+      console.log('📂 Session exists during auth failure:', sessionExists);
+      
       this.isAuthenticated = false;
       this.isReady = false;
-      
-      // Try to auto-reconnect
-      this.handleReconnection();
       
       this.io.emit('auth_failure', msg);
     });
@@ -226,6 +353,8 @@ class WhatsAppManager {
     // Enhanced disconnection handling
     this.client.on('disconnected', (reason) => {
       console.log('🔌 WhatsApp client disconnected:', reason);
+      console.log('💾 Session directory exists after disconnect:', fs.existsSync(this.sessionPath));
+      
       this.isAuthenticated = false;
       this.isReady = false;
       
@@ -234,6 +363,7 @@ class WhatsAppManager {
       
       // Only reset group selection if this was a manual logout
       if (reason === 'User logged out' || reason === 'LOGOUT') {
+        console.log('🔓 Manual logout detected - clearing session data');
         this.selectedGroup = null;
         this.selectedUser = null;
         this.messageHistory = [];
@@ -241,11 +371,6 @@ class WhatsAppManager {
       }
       
       this.io.emit('disconnected', reason);
-      
-      // Try to auto-reconnect unless it was a manual logout
-      if (reason !== 'User logged out' && reason !== 'LOGOUT') {
-        this.handleReconnection();
-      }
     });
 
     // Message handling
@@ -253,62 +378,39 @@ class WhatsAppManager {
       await this.handleIncomingMessage(message);
     });
 
-    // Loading states
-    this.client.on('loading_screen', (percent, message) => {
-      console.log('⏳ Loading:', percent, message);
-      this.io.emit('loading_progress', { percent, message });
-    });
-
     // Add connection state monitoring
     this.client.on('change_state', (state) => {
       console.log('📱 WhatsApp state changed:', state);
       this.io.emit('state_change', state);
     });
+
+    // Add additional debug events
+    this.client.on('group_join', (notification) => {
+      console.log('👥 Group join event:', notification);
+    });
+
+    this.client.on('group_leave', (notification) => {
+      console.log('👥 Group leave event:', notification);
+    });
   }
 
-  // Handle automatic reconnection
-  handleReconnection() {
-    if (this.autoReconnectAttempts < this.maxReconnectAttempts) {
-      this.autoReconnectAttempts++;
-      console.log(`🔄 Attempting to reconnect (${this.autoReconnectAttempts}/${this.maxReconnectAttempts}) in ${this.reconnectDelay/1000} seconds...`);
-      
-      setTimeout(() => {
-        if (!this.isReady) {
-          console.log('🔄 Reconnecting WhatsApp client...');
-          this.initialize();
-        }
-      }, this.reconnectDelay);
-      
-      // Increase delay for next attempt
-      this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, 30000); // Max 30 seconds
-    } else {
-      console.log('❌ Max reconnection attempts reached. Manual intervention required.');
-      this.io.emit('max_reconnect_reached');
-    }
-  }
-
-  // Pre-fetch groups in background
+  // Rest of your methods remain the same...
   async prefetchGroups() {
     try {
       console.log('🔄 Pre-fetching groups in background...');
       const groups = await this.fetchGroupsOptimized();
       console.log(`✅ Pre-fetched ${groups.length} groups`);
-      
-      // Save groups to session data
       this.saveSessionData();
     } catch (error) {
       console.error('Error pre-fetching groups:', error);
     }
   }
 
-  // Optimized group fetching with caching
   async fetchGroupsOptimized() {
     console.log('📋 Fetching groups...');
-    
     const startTime = Date.now();
     const chats = await this.client.getChats();
     
-    // Process only groups in parallel
     const groups = await Promise.all(
       chats
         .filter(chat => chat.isGroup)
@@ -334,7 +436,6 @@ class WhatsAppManager {
     const fetchTime = Date.now() - startTime;
     console.log(`✅ Fetched ${validGroups.length} groups in ${fetchTime}ms`);
     
-    // Cache the results
     this.groupsCache = validGroups;
     this.groupsCacheTime = Date.now();
     
@@ -342,12 +443,10 @@ class WhatsAppManager {
   }
 
   async getGroups() {
-    // Check if client is ready
     if (!this.isReady || !this.client) {
       throw new Error('WhatsApp client not ready. Please wait a moment and try again.');
     }
     
-    // Return cached groups if available and fresh
     if (this.groupsCache && this.groupsCacheTime) {
       const cacheAge = Date.now() - this.groupsCacheTime;
       if (cacheAge < this.CACHE_DURATION) {
@@ -356,16 +455,13 @@ class WhatsAppManager {
       }
     }
     
-    // Fetch fresh groups
     return await this.fetchGroupsOptimized();
   }
 
-  // Check if client is ready
   isClientReady() {
     return this.isReady && this.isAuthenticated && this.client;
   }
 
-  // Enhanced message handling with session saving
   async handleIncomingMessage(message) {
     console.log('Received message:', message.body || `[${message.type}]`);
     
@@ -375,7 +471,6 @@ class WhatsAppManager {
     
     let mediaPath = null;
 
-    // Handle media download
     if (message.hasMedia) {
       console.log(`📦 Message has media. Type: ${message.type}, From: ${message.author}`);
       mediaPath = await this.downloadMedia(message);
@@ -384,12 +479,10 @@ class WhatsAppManager {
     const messageData = MessageUtils.createMessageData(message, mediaPath);
     this.messageHistory.push(messageData);
     
-    // Keep message history manageable (last 1000 messages)
     if (this.messageHistory.length > 1000) {
       this.messageHistory = this.messageHistory.slice(-1000);
     }
     
-    // Group messages and update RSS
     const grouped = MessageUtils.groupMessages([messageData]);
     if (grouped.length > 0) {
       this.rssManager.updateFeed(grouped[0], this.messageHistory);
@@ -397,16 +490,12 @@ class WhatsAppManager {
     }
     
     FileUtils.updateMediaIndex(this.messageHistory);
-    
-    // Save session data after receiving new messages
     this.saveSessionData();
   }
 
-  // Enhanced media download with better error handling
   async downloadMedia(message) {
     try {
       console.log(`🎬 Starting media download for message ${message.id.id}`);
-      console.log(`📊 Media info - Type: ${message.type}, Has Media: ${message.hasMedia}`);
       
       let media = null;
       let attempts = 0;
@@ -418,7 +507,6 @@ class WhatsAppManager {
           console.log(`📥 Download attempt ${attempts}/${maxAttempts}...`);
           
           if (message.type === 'video' && attempts > 1) {
-            console.log('⏳ Waiting before retry...');
             await new Promise(resolve => setTimeout(resolve, 2000 * attempts));
           }
           
@@ -442,12 +530,6 @@ class WhatsAppManager {
         return null;
       }
 
-      console.log('✅ Media downloaded successfully:', {
-        mimetype: media.mimetype,
-        filename: media.filename,
-        size: media.data.length
-      });
-
       return FileUtils.saveMedia(media, message.id.id);
       
     } catch (err) {
@@ -456,7 +538,6 @@ class WhatsAppManager {
     }
   }
 
-  // Enhanced group selection with session persistence
   async selectGroup(groupId) {
     if (!this.isReady || !this.client) {
       throw new Error('WhatsApp not ready');
@@ -469,11 +550,8 @@ class WhatsAppManager {
       participants: chat.participants
     };
     
-    // Reset message history and RSS feed
     this.messageHistory = [];
     this.rssManager.reset();
-    
-    // Save session data immediately after selecting group
     this.saveSessionData();
     
     console.log(`✅ Selected group: ${this.selectedGroup.name}`);
@@ -495,11 +573,10 @@ class WhatsAppManager {
 
   selectUser(userId) {
     this.selectedUser = userId === 'all' ? null : userId;
-    this.saveSessionData(); // Save after user selection
+    this.saveSessionData();
     return this.selectedUser;
   }
 
-  // Enhanced history fetching
   async fetchHistory(limit = 50) {
     if (!this.selectedGroup || !this.client) {
       throw new Error('No group selected or client not ready');
@@ -525,28 +602,22 @@ class WhatsAppManager {
       })
     );
 
-    // Ensure no duplicates
     const newMessages = processedMessages.filter(
       msg => !this.messageHistory.some(existing => existing.id === msg.id)
     );
     
     this.messageHistory = MessageUtils.sortMessagesByTimestamp([...this.messageHistory, ...newMessages]);
     
-    // Keep history manageable
     if (this.messageHistory.length > 1000) {
       this.messageHistory = this.messageHistory.slice(-1000);
     }
     
     FileUtils.updateMediaIndex(this.messageHistory);
     
-    // Filter by user if specified
     const filteredMessages = MessageUtils.filterMessagesByUser(processedMessages, this.selectedUser);
-    
-    // Group messages and update RSS
     const grouped = MessageUtils.groupMessages(filteredMessages.reverse());
     grouped.forEach(group => this.rssManager.updateFeed(group, this.messageHistory));
     
-    // Save session data after fetching history
     this.saveSessionData();
     
     return grouped;
@@ -559,15 +630,10 @@ class WhatsAppManager {
     return this.messageHistory;
   }
 
-  // Enhanced logout with proper cleanup
   async logout() {
     console.log('🔓 Logging out WhatsApp session...');
     
     try {
-      // Stop periodic saving
-      this.stopPeriodicSave();
-      
-      // Clear session data
       try {
         if (fs.existsSync(this.sessionDataPath)) {
           fs.unlinkSync(this.sessionDataPath);
@@ -582,7 +648,6 @@ class WhatsAppManager {
         console.log('✅ WhatsApp client logged out');
       }
       
-      // Delete authentication folders
       const authFolders = ['.wwebjs_auth', '.wwebjs_cache'];
       
       for (const folder of authFolders) {
@@ -596,7 +661,6 @@ class WhatsAppManager {
         }
       }
       
-      // Reset all state
       this.isAuthenticated = false;
       this.isReady = false;
       this.selectedGroup = null;
@@ -605,7 +669,6 @@ class WhatsAppManager {
       this.groupsCache = null;
       this.client = null;
       
-      // Reset RSS manager
       if (this.rssManager) {
         this.rssManager.reset();
       }
@@ -616,7 +679,6 @@ class WhatsAppManager {
     } catch (error) {
       console.error('❌ Error during logout:', error);
       
-      // Force reset state
       this.isAuthenticated = false;
       this.isReady = false;
       this.selectedGroup = null;
@@ -629,10 +691,24 @@ class WhatsAppManager {
     }
   }
 
-  // Enhanced status with session info
   getStatus() {
     const sessionExists = fs.existsSync(this.sessionPath);
     const sessionDataExists = fs.existsSync(this.sessionDataPath);
+    
+    let sessionFileCount = 0;
+    let sessionFolders = [];
+    
+    if (sessionExists) {
+      try {
+        const contents = fs.readdirSync(this.sessionPath, { withFileTypes: true });
+        sessionFileCount = contents.length;
+        sessionFolders = contents
+          .filter(item => item.isDirectory())
+          .map(item => item.name);
+      } catch (err) {
+        console.warn('Could not count session files:', err.message);
+      }
+    }
     
     return {
       authenticated: this.isAuthenticated,
@@ -642,16 +718,16 @@ class WhatsAppManager {
       cachedGroups: this.groupsCache?.length || 0,
       sessionExists,
       sessionDataExists,
-      autoReconnectAttempts: this.autoReconnectAttempts,
-      messageHistoryCount: this.messageHistory.length
+      sessionFileCount,
+      sessionFolders,
+      sessionPath: this.sessionPath,
+      messageHistoryCount: this.messageHistory.length,
+      workingDirectory: process.cwd()
     };
   }
 
-  // Enhanced cleanup method
   async cleanup() {
     console.log('🧹 Cleaning up WhatsApp manager...');
-    
-    this.stopPeriodicSave();
     this.saveSessionData();
     
     if (this.client) {
@@ -664,7 +740,6 @@ class WhatsAppManager {
     }
   }
 
-  // Getters for accessing private properties
   get messageHistory() {
     return this._messageHistory || [];
   }
