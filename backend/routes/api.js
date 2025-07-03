@@ -179,11 +179,11 @@ function createApiRoutes(whatsappManager) {
       }
 
       const rawMessages = JSON.parse(fs.readFileSync(messagesPath, 'utf8'));
-      console.log('Raw messages structure:', JSON.stringify(rawMessages, null, 2));
+      // console.log('Raw messages structure:', JSON.stringify(rawMessages, null, 2));
       
       // Convert messages to the expected format
       const messages = convertToExpectedFormat(rawMessages);
-      console.log('Converted messages count:', messages.length);
+      // console.log('Converted messages count:', messages.length);
       
       const html = generateRSSWebView(messages, whatsappManager);
       

@@ -1,3 +1,4 @@
+// Server.js - Enhanced with database integration
 const express = require('express');
 const { Server } = require('socket.io');
 const http = require('http');
@@ -9,6 +10,7 @@ const config = require('./config');
 const FileUtils = require('./utils/fileUtils');
 
 // Import services
+const DatabaseService = require('./services/DatabaseService');
 const RSSManager = require('./services/RSSManager');
 const WhatsAppManager = require('./services/WhatsAppManager');
 const SocketManager = require('./services/SocketManager');
@@ -24,6 +26,7 @@ class WhatsAppMonitorServer {
       cors: config.server.cors
     });
 
+    this.databaseService = null;
     this.rssManager = null;
     this.whatsappManager = null;
     this.socketManager = null;
@@ -31,27 +34,63 @@ class WhatsAppMonitorServer {
     this.initialize();
   }
 
-  initialize() {
-    console.log('Server.js starting...');
+  async initialize() {
+    console.log('🚀 Starting WhatsApp Monitor Server...');
     
-    // Ensure required directories exist
-    FileUtils.ensureDirectories();
+    try {
+      // Ensure required directories exist
+      FileUtils.ensureDirectories();
+      
+      // Initialize database first
+      await this.initializeDatabase();
+      
+      // Initialize services with database
+      this.rssManager = new RSSManager(this.databaseService);
+      this.whatsappManager = new WhatsAppManager(this.io, this.rssManager, this.databaseService);
+      this.socketManager = new SocketManager(this.io, this.whatsappManager);
+      
+      // Setup middleware and routes
+      this.setupMiddleware();
+      this.setupRoutes();
+      
+      console.log('✅ Server initialized successfully');
+    } catch (error) {
+      console.error('❌ Server initialization failed:', error);
+      process.exit(1);
+    }
+  }
+
+  async initializeDatabase() {
+    console.log('🗄️ Initializing database...');
     
-    // Initialize services
-    this.rssManager = new RSSManager();
-    this.whatsappManager = new WhatsAppManager(this.io, this.rssManager);
-    this.socketManager = new SocketManager(this.io, this.whatsappManager);
+    this.databaseService = new DatabaseService();
     
-    // Setup middleware and routes
-    this.setupMiddleware();
-    this.setupRoutes();
-    
-    console.log('✅ Server initialized successfully');
+    try {
+      await this.databaseService.initialize();
+      console.log('✅ Database connected successfully');
+    } catch (error) {
+      console.error('❌ Database connection failed:', error);
+      
+      // Decide whether to continue without database or exit
+      if (config.database.required !== false) {
+        throw error;
+      } else {
+        console.warn('⚠️ Continuing without database (file-based mode)');
+        this.databaseService = null;
+      }
+    }
   }
 
   setupMiddleware() {
     this.app.use(cors());
-    this.app.use(express.json());
+    this.app.use(express.json({ limit: '10mb' }));
+    this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+    
+    // Request logging middleware
+    this.app.use((req, res, next) => {
+      console.log(`📝 ${req.method} ${req.path} - ${new Date().toISOString()}`);
+      next();
+    });
     
     // Enhanced static file serving with better caching
     this.app.use('/rss', express.static(path.join(__dirname, 'rss'), {
@@ -64,9 +103,9 @@ class WhatsAppMonitorServer {
       maxAge: '1d', // Cache media files for 1 day
       etag: true,
       lastModified: true,
-      setHeaders: (res, path, stat) => {
+      setHeaders: (res, filePath) => {
         // Set appropriate headers based on file type
-        const ext = path.toLowerCase().substring(path.lastIndexOf('.'));
+        const ext = path.extname(filePath).toLowerCase();
         switch (ext) {
           case '.mp4':
           case '.webm':
@@ -101,8 +140,8 @@ class WhatsAppMonitorServer {
   }
 
   setupRoutes() {
-    // API routes
-    this.app.use('/api', createApiRoutes(this.whatsappManager));
+    // API routes with database service
+    this.app.use('/api', createApiRoutes(this.whatsappManager, this.databaseService));
     
     // Enhanced RSS feed route - redirect to web view by default
     this.app.get('/rss', (req, res) => {
@@ -119,13 +158,23 @@ class WhatsAppMonitorServer {
       res.redirect('/api/rss-view');
     });
     
-    // Health check endpoint with enhanced information
-    this.app.get('/health', (req, res) => {
+    // Enhanced health check endpoint with database status
+    this.app.get('/health', async (req, res) => {
       const status = this.whatsappManager.getStatus();
       const uptime = process.uptime();
       const memoryUsage = process.memoryUsage();
       
-      res.json({
+      // Database health check
+      let databaseHealth = { status: 'disabled', type: 'none' };
+      if (this.databaseService) {
+        try {
+          databaseHealth = await this.databaseService.healthCheck();
+        } catch (error) {
+          databaseHealth = { status: 'error', error: error.message };
+        }
+      }
+      
+      const healthStatus = {
         status: 'OK',
         timestamp: new Date().toISOString(),
         uptime: {
@@ -134,15 +183,18 @@ class WhatsAppMonitorServer {
         },
         memory: {
           used: Math.round(memoryUsage.heapUsed / 1024 / 1024) + ' MB',
-          total: Math.round(memoryUsage.heapTotal / 1024 / 1024) + ' MB'
+          total: Math.round(memoryUsage.heapTotal / 1024 / 1024) + ' MB',
+          external: Math.round(memoryUsage.external / 1024 / 1024) + ' MB'
         },
         services: {
           whatsapp: {
             authenticated: status.authenticated,
             ready: status.ready,
             selectedGroup: status.selectedGroup,
-            cachedGroups: status.cachedGroups
+            cachedGroups: status.cachedGroups,
+            messageHistory: status.messageHistoryCount
           },
+          database: databaseHealth,
           rss: this.rssManager ? 'initialized' : 'not initialized',
           socket: this.socketManager ? 'active' : 'inactive'
         },
@@ -151,19 +203,51 @@ class WhatsAppMonitorServer {
           rssXml: `/rss/feed.xml`,
           mediaFiles: `/media/`,
           api: `/api/`,
-          health: `/health`
+          health: `/health`,
+          metrics: `/api/metrics`
         }
-      });
+      };
+      
+      // Return appropriate status code based on service health
+      const statusCode = (
+        databaseHealth.status === 'error' || 
+        !status.ready
+      ) ? 503 : 200;
+      
+      res.status(statusCode).json(healthStatus);
     });
     
-    // API documentation endpoint
+    // Database metrics endpoint
+    this.app.get('/api/metrics', async (req, res) => {
+      if (!this.databaseService || !this.databaseService.isConnected) {
+        return res.status(503).json({ 
+          error: 'Database not connected',
+          metrics: null 
+        });
+      }
+      
+      try {
+        const metrics = await this.getSystemMetrics();
+        res.json(metrics);
+      } catch (error) {
+        console.error('Error getting metrics:', error);
+        res.status(500).json({ error: error.message });
+      }
+    });
+    
+    // API documentation endpoint with database info
     this.app.get('/api-docs', (req, res) => {
       res.json({
         name: 'WhatsApp Monitor API',
-        version: '1.0.0',
-        description: 'API for monitoring WhatsApp messages with RSS feed generation',
+        version: '2.0.0',
+        description: 'API for monitoring WhatsApp messages with database-driven RSS feeds',
+        database: {
+          type: this.databaseService?.dbType || 'none',
+          connected: this.databaseService?.isConnected || false
+        },
         endpoints: {
           'GET /health': 'Server health and status information',
+          'GET /api/metrics': 'System and database metrics',
           'GET /api/status': 'WhatsApp client status',
           'GET /api/groups': 'List available WhatsApp groups',
           'POST /api/select-group': 'Select a group to monitor',
@@ -171,10 +255,13 @@ class WhatsAppMonitorServer {
           'POST /api/select-user': 'Filter messages by specific user',
           'POST /api/fetch-history': 'Fetch message history',
           'GET /api/messages': 'Get current messages',
+          'GET /api/search': 'Search messages',
+          'GET /api/statistics': 'Get message statistics',
           'POST /api/initialize': 'Initialize WhatsApp client',
           'POST /api/logout': 'Logout and clear session',
           'POST /api/backup-messages': 'Backup messages to file',
           'GET /api/rss-view': 'Enhanced web view of RSS feed',
+          'GET /api/rss-xml-content': 'Get RSS XML content',
           'GET /api/message/:id': 'View individual message',
           'GET /api/media-info/:filename': 'Get media file information',
           'GET /rss/feed.xml': 'RSS XML feed',
@@ -211,9 +298,53 @@ class WhatsAppMonitorServer {
       res.status(err.status || 500).json({
         error: 'Internal server error',
         message: isDevelopment ? err.message : 'Something went wrong',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        requestId: req.headers['x-request-id'] || 'unknown'
       });
     });
+  }
+
+  async getSystemMetrics() {
+    const metrics = {
+      timestamp: new Date().toISOString(),
+      server: {
+        uptime: process.uptime(),
+        memory: process.memoryUsage(),
+        cpu: process.cpuUsage()
+      },
+      database: null,
+      whatsapp: this.whatsappManager.getStatus(),
+      messages: {
+        total: 0,
+        today: 0,
+        thisWeek: 0,
+        mediaCount: 0
+      }
+    };
+
+    // Get database metrics
+    if (this.databaseService && this.databaseService.isConnected) {
+      try {
+        metrics.database = await this.databaseService.healthCheck();
+        
+        // Get message statistics
+        if (this.rssManager) {
+          const stats24h = await this.rssManager.getMessageStats(null, '24h');
+          const stats7d = await this.rssManager.getMessageStats(null, '7d');
+          
+          metrics.messages = {
+            today: stats24h.totalMessages || 0,
+            thisWeek: stats7d.totalMessages || 0,
+            mediaToday: stats24h.mediaMessages || 0,
+            uniqueUsersToday: stats24h.uniqueUsers || 0
+          };
+        }
+      } catch (error) {
+        metrics.database = { status: 'error', error: error.message };
+      }
+    }
+
+    return metrics;
   }
 
   formatUptime(seconds) {
@@ -237,11 +368,13 @@ class WhatsAppMonitorServer {
     this.server.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📡 WebSocket server ready for connections`);
+      console.log(`🗄️ Database: ${config.database.type} (${this.databaseService?.isConnected ? 'Connected' : 'Disconnected'})`);
       console.log(`🌐 Enhanced RSS web view: http://localhost:${PORT}/`);
       console.log(`🔗 RSS XML feed: http://localhost:${PORT}/rss/feed.xml`);
       console.log(`📱 Media files served at: http://localhost:${PORT}/media/`);
       console.log(`🔍 API documentation: http://localhost:${PORT}/api-docs`);
       console.log(`💚 Health check: http://localhost:${PORT}/health`);
+      console.log(`📊 Metrics: http://localhost:${PORT}/api/metrics`);
       
       // Log available endpoints
       console.log('\n📋 Available endpoints:');
@@ -251,6 +384,7 @@ class WhatsAppMonitorServer {
       console.log('   WhatsApp API: /api/*');
       console.log('   Media Files: /media/*');
       console.log('   Health Check: /health');
+      console.log('   Metrics: /api/metrics');
       console.log('   API Docs: /api-docs\n');
     });
     
@@ -266,14 +400,14 @@ class WhatsAppMonitorServer {
     });
   }
 
-  // Enhanced graceful shutdown
+  // Enhanced graceful shutdown with database cleanup
   async shutdown() {
     console.log('\n🛑 Initiating graceful shutdown...');
     
     const shutdownTimeout = setTimeout(() => {
       console.log('⏰ Shutdown timeout reached, forcing exit');
       process.exit(1);
-    }, 15000); // 15 second timeout
+    }, 20000); // 20 second timeout for database operations
     
     try {
       // Cleanup WhatsApp manager first (most important)
@@ -288,6 +422,13 @@ class WhatsAppMonitorServer {
         console.log('📡 Closing WebSocket server...');
         this.io.close();
         console.log('✅ WebSocket server closed');
+      }
+      
+      // Disconnect from database
+      if (this.databaseService) {
+        console.log('🗄️ Closing database connection...');
+        await this.databaseService.disconnect();
+        console.log('✅ Database disconnected');
       }
       
       // Close HTTP server
@@ -310,27 +451,39 @@ class WhatsAppMonitorServer {
 }
 
 // Create and start the server
-const server = new WhatsAppMonitorServer();
-server.start();
+async function startServer() {
+  const server = new WhatsAppMonitorServer();
+  
+  // Enhanced signal handling
+  const gracefulShutdown = (signal) => {
+    console.log(`\n📡 Received ${signal}, starting graceful shutdown...`);
+    server.shutdown();
+  };
 
-// Enhanced signal handling
-const gracefulShutdown = (signal) => {
-  console.log(`\n📡 Received ${signal}, starting graceful shutdown...`);
-  server.shutdown();
-};
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  // Handle uncaught exceptions
+  process.on('uncaughtException', (error) => {
+    console.error('💥 Uncaught Exception:', error);
+    server.shutdown();
+  });
 
-// Handle uncaught exceptions
-process.on('uncaughtException', (error) => {
-  console.error('💥 Uncaught Exception:', error);
-  server.shutdown();
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+    server.shutdown();
+  });
+
+  // Start the server
+  server.start();
+  
+  return server;
+}
+
+// Start the server
+startServer().catch(error => {
+  console.error('❌ Failed to start server:', error);
+  process.exit(1);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
-  server.shutdown();
-});
-
-module.exports = WhatsAppMonitorServer;
+module.exports = { WhatsAppMonitorServer, startServer };

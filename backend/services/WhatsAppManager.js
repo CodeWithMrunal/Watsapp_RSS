@@ -1,3 +1,4 @@
+// services/WhatsAppManager.js - Enhanced with database integration
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const fs = require('fs-extra');
@@ -7,149 +8,108 @@ const FileUtils = require('../utils/fileUtils');
 const MessageUtils = require('../utils/messageUtils');
 
 class WhatsAppManager {
-  constructor(io, rssManager) {
+  constructor(io, rssManager, databaseService) {
     this.client = null;
     this.io = io;
     this.rssManager = rssManager;
+    this.db = databaseService;
     this.isAuthenticated = false;
     this.isReady = false;
     this.selectedGroup = null;
     this.selectedUser = null;
-    this.messageHistory = [];
+    this.messageHistory = []; // Keep for backward compatibility
     this.groupsCache = null;
     this.groupsCacheTime = null;
     this.CACHE_DURATION = 5 * 60 * 1000; // 5 minutes cache
     
-    // CRITICAL DEBUG: Let's see what's happening with paths
-    console.log('🔍 DEBUG: Current working directory:', process.cwd());
-    console.log('🔍 DEBUG: __dirname:', __dirname);
-    
-    // Session persistence settings - Try different path approaches
-    this.sessionPath = path.resolve('./.wwebjs_auth');  // Relative to working directory
+    // Session persistence settings
+    this.sessionPath = path.resolve('./.wwebjs_auth');
     this.sessionDataPath = path.resolve('./session-data.json');
-    
-    // Alternative absolute paths (comment out one set or the other to test)
-    // this.sessionPath = path.join(process.cwd(), '.wwebjs_auth');
-    // this.sessionDataPath = path.join(process.cwd(), 'session-data.json');
-    
-    console.log('📂 DEBUG: Session paths:', {
-      sessionPath: this.sessionPath,
-      sessionDataPath: this.sessionDataPath,
-      sessionPathExists: fs.existsSync(this.sessionPath),
-      sessionDataExists: fs.existsSync(this.sessionDataPath)
-    });
     
     // Initialize session data
     this.loadSessionData();
   }
 
   // Load saved session data
-  loadSessionData() {
+  async loadSessionData() {
     try {
       if (fs.existsSync(this.sessionDataPath)) {
         const sessionData = JSON.parse(fs.readFileSync(this.sessionDataPath, 'utf8'));
         console.log('📂 Loading saved session data...');
         
-        // Restore selected group and user
         this.selectedGroup = sessionData.selectedGroup || null;
         this.selectedUser = sessionData.selectedUser || null;
         this.groupsCache = sessionData.groupsCache || null;
         this.groupsCacheTime = sessionData.groupsCacheTime || null;
-        
-        // Restore message history if available
-        if (sessionData.messageHistory && Array.isArray(sessionData.messageHistory)) {
-          this.messageHistory = sessionData.messageHistory;
-          console.log(`📋 Restored ${this.messageHistory.length} messages from previous session`);
-        }
         
         console.log('✅ Session data loaded successfully');
         if (this.selectedGroup) {
           console.log(`🎯 Previously selected group: ${this.selectedGroup.name}`);
         }
       } else {
-        console.log('📂 No previous session data found - this is normal for first run');
+        console.log('📂 No previous session data found');
       }
     } catch (error) {
       console.warn('⚠️ Could not load session data:', error.message);
     }
   }
 
-  // Save session data
-  saveSessionData() {
+  // Save session data to both file and database
+  async saveSessionData() {
     try {
       const sessionData = {
         selectedGroup: this.selectedGroup,
         selectedUser: this.selectedUser,
         groupsCache: this.groupsCache,
         groupsCacheTime: this.groupsCacheTime,
-        messageHistory: this.messageHistory.slice(-100), // Keep last 100 messages
         timestamp: Date.now()
       };
       
+      // Save to file (for backward compatibility)
       fs.writeFileSync(this.sessionDataPath, JSON.stringify(sessionData, null, 2));
-      console.log('💾 Session data saved to:', this.sessionDataPath);
+      
+      // Save to database
+      if (this.db && this.db.isConnected) {
+        await this.saveSessionToDatabase(sessionData);
+      }
+      
+      console.log('💾 Session data saved');
     } catch (error) {
       console.warn('⚠️ Could not save session data:', error.message);
     }
   }
 
-  // ENHANCED DEBUG: Initialize method with extensive logging
+  // Save session to database
+  async saveSessionToDatabase(sessionData) {
+    try {
+      const sessionRecord = {
+        session_id: 'main_session',
+        selected_group_id: this.selectedGroup?.id || null,
+        selected_user_id: this.selectedUser || null,
+        is_authenticated: this.isAuthenticated,
+        is_ready: this.isReady,
+        session_data: JSON.stringify(sessionData),
+        last_activity: new Date()
+      };
+
+      // Check if session exists
+      const existingSession = await this.db.findMany('whatsapp_sessions', 
+        { session_id: 'main_session' });
+
+      if (existingSession.length > 0) {
+        await this.db.update('whatsapp_sessions', existingSession[0].id, sessionRecord);
+      } else {
+        await this.db.create('whatsapp_sessions', sessionRecord);
+      }
+    } catch (error) {
+      console.warn('⚠️ Could not save session to database:', error.message);
+    }
+  }
+
+  // Initialize WhatsApp client
   initialize() {
     console.log('🔄 Initializing WhatsApp client...');
-    console.log('📂 Checking for existing WhatsApp session...');
     
-    // Check current working directory
-    console.log('📍 Current working directory:', process.cwd());
-    
-    // Check if session exists BEFORE creating client
-    const sessionExists = fs.existsSync(this.sessionPath);
-    console.log('📱 Session directory exists:', sessionExists);
-    console.log('📱 Session path:', this.sessionPath);
-    
-    if (sessionExists) {
-      console.log('🔍 Found existing session directory!');
-      try {
-        const sessionContents = fs.readdirSync(this.sessionPath, { withFileTypes: true });
-        console.log('📁 Session directory contents:');
-        sessionContents.forEach(item => {
-          console.log(`   ${item.isDirectory() ? '📁' : '📄'} ${item.name}`);
-        });
-        
-        // Check for the specific session folder that should contain Chrome data
-        const sessionFolders = sessionContents.filter(item => 
-          item.isDirectory() && item.name.startsWith('session')
-        );
-        
-        if (sessionFolders.length > 0) {
-          console.log('✅ Found session folders:', sessionFolders.map(f => f.name));
-          
-          // Check what's inside the session folder
-          const sessionFolder = sessionFolders[0];
-          const sessionFolderPath = path.join(this.sessionPath, sessionFolder.name);
-          const sessionFolderContents = fs.readdirSync(sessionFolderPath);
-          console.log(`📂 Contents of ${sessionFolder.name}:`, sessionFolderContents.slice(0, 10)); // First 10 items
-          
-          // Check for critical Chrome profile files
-          const criticalFiles = ['Default', 'Local State', 'Preferences'];
-          const foundFiles = criticalFiles.filter(file => 
-            sessionFolderContents.includes(file)
-          );
-          console.log('🔍 Critical Chrome files found:', foundFiles);
-          
-          if (foundFiles.length === 0) {
-            console.log('⚠️ WARNING: No critical Chrome profile files found - session may be corrupted');
-          }
-        } else {
-          console.log('⚠️ WARNING: Session directory exists but no session folders found');
-        }
-      } catch (err) {
-        console.warn('⚠️ Could not read session directory:', err.message);
-      }
-    } else {
-      console.log('📂 No existing session directory found - first time setup');
-    }
-    
-    // If client already exists, destroy it first
     if (this.client) {
       console.log('🗑️ Destroying existing client...');
       try {
@@ -159,309 +119,99 @@ class WhatsAppManager {
       }
     }
 
-    // Reset connection state (but keep session data)
     this.isAuthenticated = false;
     this.isReady = false;
 
-    // ENHANCED DEBUG: Create LocalAuth with extensive logging
-    console.log('🔧 Creating LocalAuth strategy...');
-    const clientId = 'whatsapp-monitor-session';
-    
-    console.log('📋 LocalAuth configuration:');
-    console.log('   - clientId:', clientId);
-    console.log('   - dataPath:', this.sessionPath);
-    
     const authStrategy = new LocalAuth({
-      clientId: clientId,
+      clientId: 'whatsapp-monitor-session',
       dataPath: this.sessionPath
     });
 
-    console.log('✅ LocalAuth strategy created');
-
-    // MINIMAL Puppeteer configuration to avoid conflicts
     const puppeteerConfig = {
       headless: true,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox'
       ]
-      // Remove ALL other args that might cause issues
     };
-
-    console.log('🔧 Creating WhatsApp Client...');
-    console.log('📋 Client configuration:');
-    console.log('   - authStrategy: LocalAuth with clientId', clientId);
-    console.log('   - puppeteer headless:', puppeteerConfig.headless);
-    console.log('   - puppeteer args:', puppeteerConfig.args);
 
     this.client = new Client({
       authStrategy: authStrategy,
       puppeteer: puppeteerConfig,
-      // Remove all other options that might interfere
     });
 
-    console.log('✅ WhatsApp Client created');
-
     this.setupEventHandlers();
-    
-    // Initialize the client
-    console.log('🚀 Starting WhatsApp client initialization...');
-    console.log('⏳ Please wait - checking for existing session...');
-    
     this.client.initialize();
   }
 
   setupEventHandlers() {
-    // QR Code event - with enhanced logging
     this.client.on('qr', (qr) => {
-      console.log('📱 QR Code received - This means session restoration FAILED');
-      console.log('🔍 Reasons for QR code request:');
-      console.log('   1. First time setup (expected)');
-      console.log('   2. Session directory empty or corrupted');
-      console.log('   3. WhatsApp session expired (rare)');
-      console.log('   4. Chrome profile corrupted');
-      
-      // Check session directory again when QR is requested
-      const sessionExists = fs.existsSync(this.sessionPath);
-      console.log('📂 Session directory exists when QR requested:', sessionExists);
-      
-      if (sessionExists) {
-        try {
-          const contents = fs.readdirSync(this.sessionPath);
-          console.log('📁 Session directory contents when QR requested:', contents);
-        } catch (err) {
-          console.log('❌ Cannot read session directory:', err.message);
-        }
-      }
-      
+      console.log('📱 QR Code received');
       qrcode.toDataURL(qr, (err, url) => {
         if (err) {
           console.error('Error generating QR code:', err);
           return;
         }
-        console.log('📱 QR Code generated successfully');
         this.io.emit('qr', url);
       });
     });
 
-    // Loading screen - helps debug what's happening
     this.client.on('loading_screen', (percent, message) => {
       console.log(`⏳ Loading: ${percent}% - ${message}`);
       this.io.emit('loading_progress', { percent, message });
     });
 
-    // Authentication events with enhanced logging
     this.client.on('authenticated', () => {
-      console.log('🔐 WhatsApp client authenticated successfully!');
-      console.log('💾 Session should now be saved to:', this.sessionPath);
-      
-      // Check if session was actually created
-      setTimeout(() => {
-        const sessionExists = fs.existsSync(this.sessionPath);
-        console.log('📂 Session directory exists after authentication:', sessionExists);
-        
-        if (sessionExists) {
-          try {
-            const contents = fs.readdirSync(this.sessionPath);
-            console.log('📁 Session directory contents after auth:', contents);
-          } catch (err) {
-            console.log('❌ Cannot read session after auth:', err.message);
-          }
-        }
-      }, 2000); // Check after 2 seconds
-      
+      console.log('🔐 WhatsApp client authenticated!');
       this.isAuthenticated = true;
       this.io.emit('authenticated');
     });
 
-    // Ready event with enhanced logging
     this.client.on('ready', async () => {
       console.log('✅ WhatsApp client is ready!');
       this.isReady = true;
       
-      // Final check of session directory
-      const sessionExists = fs.existsSync(this.sessionPath);
-      console.log('💾 Final session check - directory exists:', sessionExists);
-      
-      if (sessionExists) {
-        try {
-          const contents = fs.readdirSync(this.sessionPath, { withFileTypes: true });
-          console.log('📁 Final session directory structure:');
-          contents.forEach(item => {
-            if (item.isDirectory()) {
-              console.log(`   📁 ${item.name}/`);
-              try {
-                const subContents = fs.readdirSync(path.join(this.sessionPath, item.name));
-                console.log(`      Files: ${subContents.length} items`);
-              } catch (e) {
-                console.log(`      Cannot read subdirectory: ${e.message}`);
-              }
-            } else {
-              console.log(`   📄 ${item.name}`);
-            }
-          });
-        } catch (err) {
-          console.log('❌ Cannot read final session:', err.message);
-        }
-      } else {
-        console.log('❌ CRITICAL: Session directory does not exist after ready!');
-      }
-      
-      // Save session data immediately when ready
-      this.saveSessionData();
-      
-      // Pre-fetch groups in background
-      this.prefetchGroups();
-      
-      // If we had a previously selected group, try to restore it
-      if (this.selectedGroup && this.selectedGroup.id) {
-        console.log(`🔄 Attempting to restore previous group: ${this.selectedGroup.name}`);
-        try {
-          const chat = await this.client.getChatById(this.selectedGroup.id);
-          if (chat) {
-            console.log(`✅ Successfully restored group: ${this.selectedGroup.name}`);
-            this.io.emit('group_restored', this.selectedGroup);
-          }
-        } catch (error) {
-          console.warn(`⚠️ Could not restore previous group: ${error.message}`);
-          this.selectedGroup = null;
-        }
-      }
+      await this.saveSessionData();
+      await this.prefetchGroups();
+      await this.restorePreviousState();
       
       this.io.emit('ready');
     });
 
-    // Enhanced authentication failure handling
     this.client.on('auth_failure', (msg) => {
       console.error('❌ Authentication failed:', msg);
-      console.log('🔍 Possible reasons:');
-      console.log('   1. Session files corrupted');
-      console.log('   2. WhatsApp session expired');
-      console.log('   3. Phone disconnected from internet');
-      console.log('   4. Chrome profile corruption');
-      
-      // Check session state during auth failure
-      const sessionExists = fs.existsSync(this.sessionPath);
-      console.log('📂 Session exists during auth failure:', sessionExists);
-      
       this.isAuthenticated = false;
       this.isReady = false;
-      
       this.io.emit('auth_failure', msg);
     });
 
-    // Enhanced disconnection handling
     this.client.on('disconnected', (reason) => {
       console.log('🔌 WhatsApp client disconnected:', reason);
-      console.log('💾 Session directory exists after disconnect:', fs.existsSync(this.sessionPath));
-      
       this.isAuthenticated = false;
       this.isReady = false;
       
-      // Save current state before handling disconnection
       this.saveSessionData();
       
-      // Only reset group selection if this was a manual logout
       if (reason === 'User logged out' || reason === 'LOGOUT') {
-        console.log('🔓 Manual logout detected - clearing session data');
         this.selectedGroup = null;
         this.selectedUser = null;
-        this.messageHistory = [];
         this.groupsCache = null;
       }
       
       this.io.emit('disconnected', reason);
     });
 
-    // Message handling
     this.client.on('message', async (message) => {
       await this.handleIncomingMessage(message);
     });
 
-    // Add connection state monitoring
     this.client.on('change_state', (state) => {
       console.log('📱 WhatsApp state changed:', state);
       this.io.emit('state_change', state);
     });
-
-    // Add additional debug events
-    this.client.on('group_join', (notification) => {
-      console.log('👥 Group join event:', notification);
-    });
-
-    this.client.on('group_leave', (notification) => {
-      console.log('👥 Group leave event:', notification);
-    });
   }
 
-  // Rest of your methods remain the same...
-  async prefetchGroups() {
-    try {
-      console.log('🔄 Pre-fetching groups in background...');
-      const groups = await this.fetchGroupsOptimized();
-      console.log(`✅ Pre-fetched ${groups.length} groups`);
-      this.saveSessionData();
-    } catch (error) {
-      console.error('Error pre-fetching groups:', error);
-    }
-  }
-
-  async fetchGroupsOptimized() {
-    console.log('📋 Fetching groups...');
-    const startTime = Date.now();
-    const chats = await this.client.getChats();
-    
-    const groups = await Promise.all(
-      chats
-        .filter(chat => chat.isGroup)
-        .map(async (group) => {
-          try {
-            return {
-              id: group.id._serialized,
-              name: group.name || 'Unnamed Group',
-              participantCount: group.participants?.length || 0,
-              lastMessage: group.lastMessage?.body?.substring(0, 50) || '',
-              timestamp: group.timestamp || 0,
-              isArchived: group.archived || false,
-              isMuted: group.isMuted || false
-            };
-          } catch (error) {
-            console.warn(`Error processing group ${group.name}:`, error);
-            return null;
-          }
-        })
-    );
-
-    const validGroups = groups.filter(g => g !== null);
-    const fetchTime = Date.now() - startTime;
-    console.log(`✅ Fetched ${validGroups.length} groups in ${fetchTime}ms`);
-    
-    this.groupsCache = validGroups;
-    this.groupsCacheTime = Date.now();
-    
-    return validGroups;
-  }
-
-  async getGroups() {
-    if (!this.isReady || !this.client) {
-      throw new Error('WhatsApp client not ready. Please wait a moment and try again.');
-    }
-    
-    if (this.groupsCache && this.groupsCacheTime) {
-      const cacheAge = Date.now() - this.groupsCacheTime;
-      if (cacheAge < this.CACHE_DURATION) {
-        console.log('📦 Returning cached groups');
-        return this.groupsCache;
-      }
-    }
-    
-    return await this.fetchGroupsOptimized();
-  }
-
-  isClientReady() {
-    return this.isReady && this.isAuthenticated && this.client;
-  }
-
+  // Enhanced message handling with database storage
   async handleIncomingMessage(message) {
     console.log('Received message:', message.body || `[${message.type}]`);
     
@@ -477,20 +227,66 @@ class WhatsAppManager {
     }
 
     const messageData = MessageUtils.createMessageData(message, mediaPath);
-    this.messageHistory.push(messageData);
     
-    if (this.messageHistory.length > 1000) {
-      this.messageHistory = this.messageHistory.slice(-1000);
+    // Store in database
+    try {
+      await this.storeMessageInDatabase(messageData);
+      
+      // Create message group for RSS
+      const messageGroup = {
+        id: `group_${messageData.id}_${Date.now()}`,
+        groupId: this.selectedGroup.id,
+        author: message.author || 'Unknown',
+        userId: message.author,
+        timestamp: messageData.timestamp,
+        messages: [messageData],
+        type: 'group'
+      };
+      
+      // Update RSS feed from database
+      await this.rssManager.updateFeed(messageGroup, this.selectedGroup.id);
+      
+      // Emit to clients
+      this.io.emit('new_message', messageGroup);
+      
+      console.log('✅ Message processed and stored in database');
+    } catch (error) {
+      console.error('❌ Error processing message:', error);
+      
+      // Fallback to in-memory storage
+      this.messageHistory.push(messageData);
+      if (this.messageHistory.length > 1000) {
+        this.messageHistory = this.messageHistory.slice(-1000);
+      }
     }
     
-    const grouped = MessageUtils.groupMessages([messageData]);
-    if (grouped.length > 0) {
-      this.rssManager.updateFeed(grouped[0], this.messageHistory);
-      this.io.emit('new_message', grouped[0]);
+    FileUtils.updateMediaIndex([messageData]);
+    await this.saveSessionData();
+  }
+
+  // Store message in database
+  async storeMessageInDatabase(messageData) {
+    if (!this.db || !this.db.isConnected) {
+      throw new Error('Database not connected');
     }
-    
-    FileUtils.updateMediaIndex(this.messageHistory);
-    this.saveSessionData();
+
+    try {
+      // Store the user if not exists
+      if (messageData.author && messageData.userId) {
+        await this.rssManager.upsertUser(messageData.userId, {
+          name: messageData.author,
+          pushName: messageData.author
+        });
+      }
+
+      // Store the message
+      await this.rssManager.storeMessage(messageData, this.selectedGroup.id);
+      
+      console.log(`💾 Message stored in database: ${messageData.id}`);
+    } catch (error) {
+      console.error('❌ Error storing message in database:', error);
+      throw error;
+    }
   }
 
   async downloadMedia(message) {
@@ -538,6 +334,116 @@ class WhatsAppManager {
     }
   }
 
+  async prefetchGroups() {
+    try {
+      console.log('🔄 Pre-fetching groups...');
+      const groups = await this.fetchGroupsOptimized();
+      console.log(`✅ Pre-fetched ${groups.length} groups`);
+      
+      // Store groups in database
+      if (this.db && this.db.isConnected) {
+        for (const group of groups) {
+          await this.rssManager.storeGroup(group);
+          
+          // Store group memberships if available
+          if (group.participants) {
+            for (const participant of group.participants) {
+              await this.rssManager.upsertUser(participant.id._serialized, {
+                name: participant.pushname || participant.id.user,
+                pushName: participant.pushname
+              });
+              
+              await this.rssManager.storeGroupMembership(
+                group.id, 
+                participant.id._serialized, 
+                participant.isAdmin
+              );
+            }
+          }
+        }
+      }
+      
+      await this.saveSessionData();
+    } catch (error) {
+      console.error('Error pre-fetching groups:', error);
+    }
+  }
+
+  async fetchGroupsOptimized() {
+    console.log('📋 Fetching groups...');
+    const startTime = Date.now();
+    const chats = await this.client.getChats();
+    
+    const groups = await Promise.all(
+      chats
+        .filter(chat => chat.isGroup)
+        .map(async (group) => {
+          try {
+            return {
+              id: group.id._serialized,
+              name: group.name || 'Unnamed Group',
+              participantCount: group.participants?.length || 0,
+              participants: group.participants || [],
+              lastMessage: group.lastMessage?.body?.substring(0, 50) || '',
+              timestamp: group.timestamp || 0,
+              isArchived: group.archived || false,
+              isMuted: group.isMuted || false
+            };
+          } catch (error) {
+            console.warn(`Error processing group ${group.name}:`, error);
+            return null;
+          }
+        })
+    );
+
+    const validGroups = groups.filter(g => g !== null);
+    const fetchTime = Date.now() - startTime;
+    console.log(`✅ Fetched ${validGroups.length} groups in ${fetchTime}ms`);
+    
+    this.groupsCache = validGroups;
+    this.groupsCacheTime = Date.now();
+    
+    return validGroups;
+  }
+
+  async getGroups() {
+    if (!this.isReady || !this.client) {
+      throw new Error('WhatsApp client not ready. Please wait a moment and try again.');
+    }
+    
+    // Try to get from database first
+    if (this.db && this.db.isConnected) {
+      try {
+        const dbGroups = await this.db.findMany('groups', {}, { 
+          orderBy: 'updated_at DESC',
+          limit: 100 
+        });
+        
+        if (dbGroups.length > 0) {
+          console.log(`📦 Returning ${dbGroups.length} groups from database`);
+          return dbGroups;
+        }
+      } catch (error) {
+        console.warn('⚠️ Could not fetch groups from database:', error.message);
+      }
+    }
+    
+    // Fallback to cache or fetch from WhatsApp
+    if (this.groupsCache && this.groupsCacheTime) {
+      const cacheAge = Date.now() - this.groupsCacheTime;
+      if (cacheAge < this.CACHE_DURATION) {
+        console.log('📦 Returning cached groups');
+        return this.groupsCache;
+      }
+    }
+    
+    return await this.fetchGroupsOptimized();
+  }
+
+  isClientReady() {
+    return this.isReady && this.isAuthenticated && this.client;
+  }
+
   async selectGroup(groupId) {
     if (!this.isReady || !this.client) {
       throw new Error('WhatsApp not ready');
@@ -550,9 +456,14 @@ class WhatsAppManager {
       participants: chat.participants
     };
     
+    // Clear in-memory history (we'll use database)
     this.messageHistory = [];
+    
+    // Reset RSS manager
     this.rssManager.reset();
-    this.saveSessionData();
+    
+    // Store group selection in database
+    await this.saveSessionData();
     
     console.log(`✅ Selected group: ${this.selectedGroup.name}`);
     
@@ -587,67 +498,183 @@ class WhatsAppManager {
     
     const processedMessages = await Promise.all(
       messages.map(async (msg) => {
-        const existing = this.messageHistory.find(m => m.id === msg.id._serialized);
-        let mediaPath = existing?.mediaPath || null;
+        let mediaPath = null;
 
-        if (existing) {
-          console.log(`🔁 Message ${msg.id._serialized} already exists`);
-        }
-
-        if (msg.hasMedia && !mediaPath) {
+        if (msg.hasMedia) {
           mediaPath = await this.downloadMedia(msg);
         }
 
-        return MessageUtils.createMessageData(msg, mediaPath);
+        const messageData = MessageUtils.createMessageData(msg, mediaPath);
+        
+        // Store in database
+        try {
+          await this.storeMessageInDatabase(messageData);
+        } catch (error) {
+          console.warn(`⚠️ Could not store message ${messageData.id} in database:`, error.message);
+          // Add to in-memory as fallback
+          this.messageHistory.push(messageData);
+        }
+
+        return messageData;
       })
     );
 
-    const newMessages = processedMessages.filter(
-      msg => !this.messageHistory.some(existing => existing.id === msg.id)
-    );
+    // Keep some in memory for backward compatibility
+    this.messageHistory = [...this.messageHistory, ...processedMessages]
+      .slice(-1000); // Keep last 1000
     
-    this.messageHistory = MessageUtils.sortMessagesByTimestamp([...this.messageHistory, ...newMessages]);
+    FileUtils.updateMediaIndex(processedMessages);
     
-    if (this.messageHistory.length > 1000) {
-      this.messageHistory = this.messageHistory.slice(-1000);
-    }
-    
-    FileUtils.updateMediaIndex(this.messageHistory);
-    
+    // Generate message groups for RSS
     const filteredMessages = MessageUtils.filterMessagesByUser(processedMessages, this.selectedUser);
     const grouped = MessageUtils.groupMessages(filteredMessages.reverse());
-    grouped.forEach(group => this.rssManager.updateFeed(group, this.messageHistory));
     
-    this.saveSessionData();
+    // Update RSS feed for each group
+    for (const group of grouped) {
+      try {
+        await this.rssManager.updateFeed(group, this.selectedGroup.id);
+      } catch (error) {
+        console.warn('⚠️ Could not update RSS feed:', error.message);
+      }
+    }
+    
+    await this.saveSessionData();
     
     return grouped;
   }
 
-  getMessages(grouped = true) {
+  // Get messages from database with fallback to memory
+  async getMessages(grouped = true, limit = 50) {
+    try {
+      if (this.db && this.db.isConnected && this.selectedGroup) {
+        // Get from database
+        const dbMessages = await this.db.findMany('messages', 
+          { group_id: this.selectedGroup.id }, 
+          { 
+            orderBy: 'timestamp DESC',
+            limit: limit 
+          }
+        );
+        
+        if (dbMessages.length > 0) {
+          console.log(`📦 Retrieved ${dbMessages.length} messages from database`);
+          
+          if (grouped) {
+            return MessageUtils.groupMessages(dbMessages);
+          }
+          return dbMessages;
+        }
+      }
+    } catch (error) {
+      console.warn('⚠️ Could not get messages from database:', error.message);
+    }
+    
+    // Fallback to in-memory
     if (grouped) {
       return MessageUtils.groupMessages(this.messageHistory);
     }
     return this.messageHistory;
   }
 
+  // Get message statistics
+  async getMessageStatistics(timeRange = '24h') {
+    try {
+      if (this.db && this.db.isConnected) {
+        return await this.rssManager.getMessageStats(
+          this.selectedGroup?.id, 
+          timeRange
+        );
+      }
+    } catch (error) {
+      console.warn('⚠️ Could not get message statistics:', error.message);
+    }
+    
+    // Fallback to in-memory calculation
+    const now = Date.now();
+    const timeRanges = {
+      '1h': 3600000,
+      '24h': 86400000,
+      '7d': 604800000,
+      '30d': 2592000000
+    };
+    
+    const timeLimit = now - (timeRanges[timeRange] || timeRanges['24h']);
+    const recentMessages = this.messageHistory.filter(m => m.timestamp >= timeLimit);
+    
+    return {
+      totalMessages: recentMessages.length,
+      mediaMessages: recentMessages.filter(m => m.hasMedia).length,
+      uniqueUsers: [...new Set(recentMessages.map(m => m.userId))].length,
+      mediaTypes: recentMessages.reduce((acc, m) => {
+        if (m.hasMedia && m.mediaType) {
+          acc[m.mediaType] = (acc[m.mediaType] || 0) + 1;
+        }
+        return acc;
+      }, {})
+    };
+  }
+
+  // Search messages
+  async searchMessages(query, limit = 50) {
+    try {
+      if (this.db && this.db.isConnected) {
+        return await this.rssManager.searchMessages(
+          query, 
+          this.selectedGroup?.id, 
+          limit
+        );
+      }
+    } catch (error) {
+      console.warn('⚠️ Could not search messages in database:', error.message);
+    }
+    
+    // Fallback to in-memory search
+    const searchTerm = query.toLowerCase();
+    return this.messageHistory
+      .filter(m => 
+        (m.body && m.body.toLowerCase().includes(searchTerm)) ||
+        (m.caption && m.caption.toLowerCase().includes(searchTerm))
+      )
+      .slice(0, limit);
+  }
+
+  async restorePreviousState() {
+    if (this.selectedGroup && this.selectedGroup.id) {
+      console.log(`🔄 Attempting to restore group: ${this.selectedGroup.name}`);
+      try {
+        const chat = await this.client.getChatById(this.selectedGroup.id);
+        if (chat) {
+          console.log(`✅ Group restored successfully: ${this.selectedGroup.name}`);
+          this.io.emit('group_restored', this.selectedGroup);
+          
+          // Regenerate RSS feed from database
+          try {
+            await this.rssManager.generateRSSFromDatabase(this.selectedGroup.id);
+          } catch (error) {
+            console.warn('⚠️ Could not regenerate RSS feed:', error.message);
+          }
+        }
+      } catch (error) {
+        console.warn(`⚠️ Could not restore group: ${error.message}`);
+        this.selectedGroup = null;
+      }
+    }
+  }
+
   async logout() {
     console.log('🔓 Logging out WhatsApp session...');
     
     try {
-      try {
-        if (fs.existsSync(this.sessionDataPath)) {
-          fs.unlinkSync(this.sessionDataPath);
-          console.log('🗑️ Session data file deleted');
-        }
-      } catch (error) {
-        console.warn('⚠️ Could not delete session data:', error);
-      }
+      // Save final state
+      await this.saveSessionData();
       
+      // Logout from WhatsApp
       if (this.client) {
         await this.client.logout();
         console.log('✅ WhatsApp client logged out');
       }
       
+      // Clean up session files
       const authFolders = ['.wwebjs_auth', '.wwebjs_cache'];
       
       for (const folder of authFolders) {
@@ -661,6 +688,17 @@ class WhatsAppManager {
         }
       }
       
+      // Remove session data file
+      try {
+        if (fs.existsSync(this.sessionDataPath)) {
+          fs.unlinkSync(this.sessionDataPath);
+          console.log('🗑️ Session data file deleted');
+        }
+      } catch (error) {
+        console.warn('⚠️ Could not delete session data file:', error);
+      }
+      
+      // Reset state
       this.isAuthenticated = false;
       this.isReady = false;
       this.selectedGroup = null;
@@ -679,6 +717,7 @@ class WhatsAppManager {
     } catch (error) {
       console.error('❌ Error during logout:', error);
       
+      // Force reset even if logout failed
       this.isAuthenticated = false;
       this.isReady = false;
       this.selectedGroup = null;
@@ -722,13 +761,15 @@ class WhatsAppManager {
       sessionFolders,
       sessionPath: this.sessionPath,
       messageHistoryCount: this.messageHistory.length,
-      workingDirectory: process.cwd()
+      workingDirectory: process.cwd(),
+      databaseConnected: this.db?.isConnected || false,
+      databaseType: this.db?.dbType || 'none'
     };
   }
 
   async cleanup() {
     console.log('🧹 Cleaning up WhatsApp manager...');
-    this.saveSessionData();
+    await this.saveSessionData();
     
     if (this.client) {
       try {

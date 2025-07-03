@@ -1,12 +1,19 @@
 const path = require('path');
+const databaseConfig = require('./database');
 
 const config = {
   server: {
     port: process.env.PORT || 3001,
     cors: {
       origin: true,
+      credentials:true,
       methods: ["GET", "POST"]
     }
+  },
+
+  database: {
+    type: databaseConfig.type,
+    ...databaseConfig[databaseConfig.type]
   },
   
   directories: {
@@ -43,11 +50,25 @@ const config = {
 },
   
   rss: {
-    title: 'WhatsApp Monitor Feed',
-    description: 'Real-time WhatsApp group messages',
-    feed_url: 'http://localhost:3001/rss/feed.xml',
-    site_url: 'http://localhost:3001',
-    language: 'en'
+    title: 'WhatsApp Monitor RSS Feed',
+    description: 'Real-time WhatsApp message monitoring with media support',
+    site_url: `http://localhost:${process.env.PORT || 3001}`,
+    feed_url: `http://localhost:${process.env.PORT || 3001}/rss/feed.xml`,
+    image_url: `http://localhost:${process.env.PORT || 3001}/favicon.ico`,
+    managingEditor: 'WhatsApp Monitor',
+    webMaster: 'WhatsApp Monitor',
+    copyright: '2024 WhatsApp Monitor',
+    language: 'en',
+    categories: ['WhatsApp', 'Messages', 'Communication'],
+    pubDate: new Date(),
+    ttl: '60'
+  },
+  
+  app: {
+    environment: process.env.NODE_ENV || 'development',
+    logLevel: process.env.LOG_LEVEL || 'info',
+    enableMetrics: process.env.ENABLE_METRICS !== 'false',
+    maxMessageHistory: parseInt(process.env.MAX_MESSAGE_HISTORY) || 1000
   },
   
   messaging: {

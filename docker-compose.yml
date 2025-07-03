@@ -1,8 +1,45 @@
 version: '3.8'
 
 services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: whatsapp-postgres
+    environment:
+      POSTGRES_DB: whatsapp_monitor
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - whatsapp_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB Database (alternative)
+  # mongodb:
+  #   image: mongo:7-jammy
+  #   container_name: whatsapp-mongodb
+  #   environment:
+  #     MONGO_INITDB_ROOT_USERNAME: admin
+  #     MONGO_INITDB_ROOT_PASSWORD: admin123
+  #     MONGO_INITDB_DATABASE: whatsapp_monitor
+  #   volumes:
+  #     - mongodb_data:/data/db
+  #   ports:
+  #     - "27017:27017"
+  #   networks:
+  #     - whatsapp_network
+
+  # Backend Application
   backend:
-    build: 
+    build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: whatsapp-backend-dev
@@ -17,10 +54,18 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3001
-
+      - DB_TYPE=postgresql
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=whatsapp_monitor
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres123
     restart: unless-stopped
     networks:
       - whatsapp_network
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
       interval: 30s
@@ -28,6 +73,7 @@ services:
       retries: 3
       start_period: 40s
 
+  # Rest of your services...
   selenium:
     build:
       context: ./selenium
@@ -73,6 +119,10 @@ volumes:
     driver: local
   whatsapp_cache:
     driver: local
+  postgres_data:
+    driver: local
+  # mongodb_data:
+  #   driver: local
 
 networks:
   whatsapp_network:

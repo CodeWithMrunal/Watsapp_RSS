@@ -30,3 +30,4 @@ pycache/
 *.pyc
 *.pyo
 session-data.json
+.env.development

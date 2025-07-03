@@ -1,30 +1,616 @@
+// services/RSSManager.js - Enhanced database-driven RSS manager
 const RSS = require('rss');
 const fs = require('fs-extra');
 const path = require('path');
 const config = require('../config');
 
 class RSSManager {
-  constructor() {
+  constructor(databaseService) {
+    this.db = databaseService;
     this.rssFeed = null;
+    this.cache = new Map();
+    this.cacheTimeout = 5 * 60 * 1000; // 5 minutes
     this.initialize();
   }
 
   initialize() {
     this.rssFeed = new RSS({
       ...config.rss,
-      // Enhanced RSS configuration
       custom_namespaces: {
         'content': 'http://purl.org/rss/1.0/modules/content/',
         'media': 'http://search.yahoo.com/mrss/',
         'dc': 'http://purl.org/dc/elements/1.1/'
       }
     });
-    console.log('✅ RSS Feed initialized with enhanced features');
+    console.log('✅ RSS Manager initialized with database support');
   }
 
   /**
-   * Get media type and generate appropriate HTML
+   * Store message in database and update RSS feed
    */
+  async updateFeed(messageGroup, selectedGroupId = null) {
+    try {
+      // Store message group in database
+      await this.storeMessageGroup(messageGroup);
+      
+      // Generate RSS feed from database
+      await this.generateRSSFromDatabase(selectedGroupId);
+      
+      console.log(`✅ RSS feed updated with message group: ${messageGroup.id}`);
+    } catch (error) {
+      console.error('❌ Error updating RSS feed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Store individual message in database
+   */
+  async storeMessage(messageData, groupId) {
+    try {
+      // First, ensure user exists
+      if (messageData.author && messageData.userId) {
+        await this.upsertUser(messageData.userId, {
+          name: messageData.author,
+          pushName: messageData.author
+        });
+      }
+
+      // Store the message
+      const messageRecord = {
+        id: messageData.id,
+        group_id: groupId,
+        user_id: messageData.userId || null,
+        message_type: messageData.type || 'chat',
+        body: messageData.body || null,
+        caption: messageData.caption || null,
+        timestamp: messageData.timestamp,
+        has_media: messageData.hasMedia || false,
+        media_path: messageData.mediaPath || null,
+        media_type: messageData.mediaType || null,
+        media_size: messageData.mediaSize || null,
+        media_mimetype: messageData.mediaMimetype || null,
+        is_forwarded: messageData.isForwarded || false,
+        reply_to_message_id: messageData.replyTo || null
+      };
+
+      // Check if message already exists
+      const existingMessage = await this.db.findById('messages', messageData.id);
+      
+      if (existingMessage) {
+        await this.db.update('messages', messageData.id, messageRecord);
+        console.log(`📝 Updated message: ${messageData.id}`);
+      } else {
+        await this.db.create('messages', messageRecord);
+        console.log(`💾 Stored new message: ${messageData.id}`);
+      }
+
+      return messageRecord;
+    } catch (error) {
+      console.error('❌ Error storing message:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Store message group for RSS generation
+   */
+async storeMessageGroup(messageGroup) {
+  try {
+    // FIRST: Ensure the group exists in the groups table
+    const groupId = messageGroup.groupId || messageGroup.id;
+    await this.ensureGroupExists(groupId, messageGroup);
+
+    // SECOND: Store individual messages (now that group exists)
+    for (const message of messageGroup.messages) {
+      await this.storeMessage(message, groupId);
+    }
+
+    // THIRD: Create/update message group record
+    const groupRecord = {
+      id: messageGroup.id,
+      group_id: groupId,
+      author_id: messageGroup.userId || null,
+      author_name: messageGroup.author || 'Unknown',
+      message_count: messageGroup.messages.length,
+      first_message_id: messageGroup.messages[0]?.id || null,
+      last_message_id: messageGroup.messages[messageGroup.messages.length - 1]?.id || null,
+      timestamp: messageGroup.timestamp
+    };
+
+    // Check if group already exists
+    const existingGroup = await this.db.findById('message_groups', messageGroup.id);
+    
+    if (existingGroup) {
+      await this.db.update('message_groups', messageGroup.id, groupRecord);
+    } else {
+      await this.db.create('message_groups', groupRecord);
+    }
+
+    return groupRecord;
+  } catch (error) {
+    console.error('❌ Error storing message group:', error);
+    throw error;
+  }
+}
+
+async ensureGroupExists(groupId, messageGroup) {
+  try {
+    // Check if group already exists
+    const existingGroup = await this.db.findById('groups', groupId);
+    
+    if (!existingGroup) {
+      // Create basic group record
+      const groupRecord = {
+        id: groupId,
+        name: messageGroup.groupName || messageGroup.author || 'Unknown Group',
+        description: null,
+        participant_count: 0,
+        is_archived: false,
+        is_muted: false
+      };
+
+      await this.db.create('groups', groupRecord);
+      console.log(`📁 Created group record: ${groupId}`);
+    }
+  } catch (error) {
+    console.error('❌ Error ensuring group exists:', error);
+    throw error;
+  }
+}
+  /**
+   * Generate RSS feed from database
+   */
+  async generateRSSFromDatabase(selectedGroupId = null, limit = 50) {
+    try {
+      // Reset RSS feed
+      this.initialize();
+
+      // Get message groups from database with messages
+      const messageGroups = await this.getMessageGroupsWithMessages(selectedGroupId, limit);
+
+      // Generate RSS items
+      for (const group of messageGroups) {
+        await this.addRSSItem(group);
+      }
+
+      // Save to file system
+      await this.saveRSSToFile();
+
+      console.log(`✅ Generated RSS feed with ${messageGroups.length} message groups`);
+      return messageGroups.length;
+    } catch (error) {
+      console.error('❌ Error generating RSS from database:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get message groups with their messages from database
+   */
+  async getMessageGroupsWithMessages(selectedGroupId = null, limit = 50) {
+    try {
+      let conditions = {};
+      if (selectedGroupId) {
+        conditions.group_id = selectedGroupId;
+      }
+
+      const options = {
+        orderBy: 'timestamp DESC',
+        limit: limit
+      };
+
+      // Get message groups
+      const messageGroups = await this.db.findMany('message_groups', conditions, options);
+
+      // Enrich with actual messages
+      for (const group of messageGroups) {
+        group.messages = await this.getMessagesForGroup(group.id);
+      }
+
+      return messageGroups;
+    } catch (error) {
+      console.error('❌ Error getting message groups:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get messages for a specific message group
+   */
+  async getMessagesForGroup(messageGroupId) {
+    try {
+      // Get the message group to find the message IDs
+      const group = await this.db.findById('message_groups', messageGroupId);
+      if (!group) return [];
+
+      // Get messages between first and last message timestamps
+      const conditions = {
+        group_id: group.group_id,
+        timestamp: group.timestamp // For simplicity, getting messages around this timestamp
+      };
+
+      // This is a simplified approach - you might want to store message IDs in the group
+      // or use a more sophisticated query to get the exact messages
+      const messages = await this.db.findMany('messages', 
+        { group_id: group.group_id }, 
+        { 
+          orderBy: 'timestamp DESC',
+          limit: 10 // Limit messages per group
+        }
+      );
+
+      return messages.filter(msg => 
+        Math.abs(msg.timestamp - group.timestamp) < 300000 // Within 5 minutes
+      );
+    } catch (error) {
+      console.error('❌ Error getting messages for group:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Add RSS item from message group
+   */
+  async addRSSItem(messageGroup) {
+    try {
+      let description = '';
+      let title = `Messages from ${messageGroup.author_name}`;
+      let mediaCount = 0;
+      let linkCount = 0;
+
+      // Add CSS and JS
+      description += this.generateEnhancedCSS();
+      description += this.generateEnhancedJS();
+      
+      // Start message container
+      description += '<div class="message-container">';
+      description += `<div class="message-header">
+        <div class="author-name">${messageGroup.author_name}</div>
+        <div class="message-time">${new Date(messageGroup.timestamp * 1000).toLocaleString()}</div>
+      </div>`;
+      description += '<div class="message-content">';
+
+      // Process each message
+      for (const message of messageGroup.messages) {
+        if (message.message_type === 'chat' && message.body) {
+          const formattedBody = this.formatMessageForRSS(message.body);
+          description += `<div class="text-message">${formattedBody}</div>`;
+          
+          const links = message.body.match(/https?:\/\/[^\s]+/g) || [];
+          linkCount += links.length;
+        } else if (message.has_media && message.media_path) {
+          mediaCount++;
+          const mediaHTML = this.generateMediaHTML(
+            message.media_path, 
+            message.body || message.caption, 
+            message.media_type
+          );
+          description += mediaHTML;
+        }
+      }
+
+      // Close content and add stats
+      description += '</div>';
+      
+      // Add statistics
+      const stats = [];
+      if (messageGroup.message_count > 1) {
+        stats.push(`${messageGroup.message_count} messages`);
+      }
+      if (mediaCount > 0) {
+        stats.push(`${mediaCount} media file${mediaCount > 1 ? 's' : ''}`);
+      }
+      if (linkCount > 0) {
+        stats.push(`🔗 ${linkCount} link${linkCount > 1 ? 's' : ''}`);
+      }
+
+      if (stats.length > 0) {
+        description += `<div class="message-stats">${stats.join(' • ')}</div>`;
+      }
+      
+      description += '</div>';
+
+      // Create RSS item
+      const rssItem = {
+        title: title,
+        description: description,
+        url: `http://localhost:${config.server.port}/message/${messageGroup.id}`,
+        date: new Date(messageGroup.timestamp * 1000),
+        guid: messageGroup.id,
+        categories: ['whatsapp', 'messages'],
+        custom_elements: [
+          { 'content:encoded': `<![CDATA[${description}]]>` },
+          { 'dc:creator': messageGroup.author_name }
+        ]
+      };
+
+      this.rssFeed.item(rssItem);
+    } catch (error) {
+      console.error('❌ Error adding RSS item:', error);
+    }
+  }
+
+  /**
+   * Save RSS feed to file system
+   */
+  async saveRSSToFile() {
+    try {
+      await fs.ensureDir('./rss');
+      
+      // Generate RSS XML
+      const rssXml = this.rssFeed.xml({ indent: true });
+      await fs.writeFile('./rss/feed.xml', rssXml);
+      
+      // Also save a JSON version for easier API access
+      const messageGroups = await this.getMessageGroupsWithMessages(null, 100);
+      await fs.writeFile('./rss/messages.json', JSON.stringify(messageGroups, null, 2));
+      
+      console.log('💾 RSS feed saved to file system');
+    } catch (error) {
+      console.error('❌ Error saving RSS feed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get RSS feed data for API endpoints
+   */
+  async getRSSFeedData(selectedGroupId = null, limit = 50) {
+    const cacheKey = `rss_${selectedGroupId || 'all'}_${limit}`;
+    
+    // Check cache first
+    if (this.cache.has(cacheKey)) {
+      const cached = this.cache.get(cacheKey);
+      if (Date.now() - cached.timestamp < this.cacheTimeout) {
+        return cached.data;
+      }
+    }
+
+    try {
+      const messageGroups = await this.getMessageGroupsWithMessages(selectedGroupId, limit);
+      
+      // Cache the result
+      this.cache.set(cacheKey, {
+        data: messageGroups,
+        timestamp: Date.now()
+      });
+      
+      return messageGroups;
+    } catch (error) {
+      console.error('❌ Error getting RSS feed data:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Store group information
+   */
+  async storeGroup(groupData) {
+    try {
+      const groupRecord = {
+        id: groupData.id,
+        name: groupData.name || 'Unknown Group',
+        description: groupData.description || null,
+        participant_count: groupData.participantCount || 0,
+        is_archived: groupData.isArchived || false,
+        is_muted: groupData.isMuted || false
+      };
+
+      const existingGroup = await this.db.findById('groups', groupData.id);
+      
+      if (existingGroup) {
+        await this.db.update('groups', groupData.id, groupRecord);
+      } else {
+        await this.db.create('groups', groupRecord);
+      }
+
+      return groupRecord;
+    } catch (error) {
+      console.error('❌ Error storing group:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Store user information
+   */
+  async upsertUser(userId, userData) {
+    try {
+      const userRecord = {
+        id: userId,
+        name: userData.name || null,
+        push_name: userData.pushName || userData.name || null,
+        phone_number: userData.phoneNumber || null,
+        profile_pic_url: userData.profilePicUrl || null
+      };
+
+      const existingUser = await this.db.findById('users', userId);
+      
+      if (existingUser) {
+        await this.db.update('users', userId, userRecord);
+      } else {
+        await this.db.create('users', userRecord);
+      }
+
+      return userRecord;
+    } catch (error) {
+      console.error('❌ Error storing user:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Store group membership
+   */
+  async storeGroupMembership(groupId, userId, isAdmin = false) {
+    try {
+      const membershipRecord = {
+        group_id: groupId,
+        user_id: userId,
+        is_admin: isAdmin
+      };
+
+      // For PostgreSQL, we need to handle the composite primary key
+      if (this.db.dbType === 'postgresql') {
+        const existing = await this.db.query(
+          'SELECT * FROM group_memberships WHERE group_id = $1 AND user_id = $2',
+          [groupId, userId]
+        );
+
+        if (existing.length === 0) {
+          await this.db.create('group_memberships', membershipRecord);
+        }
+      } else {
+        // For MongoDB, use upsert
+        await this.db.db.collection('groupMemberships').updateOne(
+          { groupId, userId },
+          { $set: { ...membershipRecord, updatedAt: new Date() } },
+          { upsert: true }
+        );
+      }
+
+      return membershipRecord;
+    } catch (error) {
+      console.error('❌ Error storing group membership:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get message statistics
+   */
+  async getMessageStats(groupId = null, timeRange = '24h') {
+    try {
+      const timeRanges = {
+        '1h': 3600000,
+        '24h': 86400000,
+        '7d': 604800000,
+        '30d': 2592000000
+      };
+
+      const timeLimit = Date.now() - (timeRanges[timeRange] || timeRanges['24h']);
+      
+      let conditions = {
+        timestamp: { $gte: timeLimit }
+      };
+
+      if (groupId) {
+        conditions.group_id = groupId;
+      }
+
+      if (this.db.dbType === 'postgresql') {
+        const query = `
+          SELECT 
+            COUNT(*) as total_messages,
+            COUNT(CASE WHEN has_media THEN 1 END) as media_messages,
+            COUNT(DISTINCT user_id) as unique_users,
+            media_type,
+            COUNT(*) as type_count
+          FROM messages 
+          WHERE timestamp >= $1 ${groupId ? 'AND group_id = $2' : ''}
+          GROUP BY media_type
+        `;
+        
+        const params = groupId ? [timeLimit, groupId] : [timeLimit];
+        const result = await this.db.query(query, params);
+        
+        return this.formatStatsResult(result);
+      } else {
+        // MongoDB aggregation
+        const pipeline = [
+          { $match: conditions },
+          {
+            $group: {
+              _id: null,
+              totalMessages: { $sum: 1 },
+              mediaMessages: { $sum: { $cond: ['$hasMedia', 1, 0] } },
+              uniqueUsers: { $addToSet: '$userId' }
+            }
+          }
+        ];
+
+        const result = await this.db.aggregate('messages', pipeline);
+        return result[0] || { totalMessages: 0, mediaMessages: 0, uniqueUsers: [] };
+      }
+    } catch (error) {
+      console.error('❌ Error getting message stats:', error);
+      return { totalMessages: 0, mediaMessages: 0, uniqueUsers: [] };
+    }
+  }
+
+  /**
+   * Clean up old messages (optional)
+   */
+  async cleanupOldMessages(retentionDays = 30) {
+    try {
+      const cutoffTime = Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
+      
+      if (this.db.dbType === 'postgresql') {
+        const result = await this.db.query(
+          'DELETE FROM messages WHERE timestamp < $1',
+          [cutoffTime]
+        );
+        console.log(`🧹 Cleaned up ${result.rowCount} old messages`);
+      } else {
+        const result = await this.db.db.collection('messages').deleteMany({
+          timestamp: { $lt: cutoffTime }
+        });
+        console.log(`🧹 Cleaned up ${result.deletedCount} old messages`);
+      }
+    } catch (error) {
+      console.error('❌ Error cleaning up old messages:', error);
+    }
+  }
+
+  /**
+   * Search messages
+   */
+  async searchMessages(query, groupId = null, limit = 50) {
+    try {
+      if (this.db.dbType === 'postgresql') {
+        let sql = `
+          SELECT m.*, u.name as author_name 
+          FROM messages m 
+          LEFT JOIN users u ON m.user_id = u.id 
+          WHERE (m.body ILIKE $1 OR m.caption ILIKE $1)
+        `;
+        
+        const params = [`%${query}%`];
+        
+        if (groupId) {
+          sql += ' AND m.group_id = $2';
+          params.push(groupId);
+        }
+        
+        sql += ' ORDER BY m.timestamp DESC LIMIT  + (params.length + 1)';
+        params.push(limit);
+        
+        return await this.db.query(sql, params);
+      } else {
+        const conditions = {
+          $or: [
+            { body: { $regex: query, $options: 'i' } },
+            { caption: { $regex: query, $options: 'i' } }
+          ]
+        };
+        
+        if (groupId) {
+          conditions.groupId = groupId;
+        }
+        
+        return await this.db.findMany('messages', conditions, {
+          sort: { timestamp: -1 },
+          limit
+        });
+      }
+    } catch (error) {
+      console.error('❌ Error searching messages:', error);
+      return [];
+    }
+  }
+
+  // Keep all the existing utility methods
   generateMediaHTML(mediaPath, messageBody, mediaType) {
     if (!mediaPath) return '';
 
@@ -54,7 +640,7 @@ class RSSManager {
         `;
       
       case 'audio':
-      case 'ptt': // Voice message
+      case 'ptt':
         return `
           <div class="media-container audio-container">
             <audio controls class="media-audio">
@@ -98,9 +684,6 @@ class RSSManager {
     }
   }
 
-  /**
-   * Generate enhanced CSS for the RSS feed
-   */
   generateEnhancedCSS() {
     return `
       <style type="text/css">
@@ -252,7 +835,6 @@ class RSSManager {
           text-decoration: underline;
         }
         
-        /* Mobile responsiveness */
         @media (max-width: 768px) {
           body {
             padding: 10px;
@@ -273,54 +855,13 @@ class RSSManager {
             max-height: 250px;
           }
         }
-        
-        /* Image modal styles */
-        .image-modal {
-          display: none;
-          position: fixed;
-          z-index: 1000;
-          left: 0;
-          top: 0;
-          width: 100%;
-          height: 100%;
-          background-color: rgba(0,0,0,0.9);
-          cursor: pointer;
-        }
-        
-        .modal-content {
-          position: absolute;
-          top: 50%;
-          left: 50%;
-          transform: translate(-50%, -50%);
-          max-width: 90%;
-          max-height: 90%;
-        }
-        
-        .modal-image {
-          width: 100%;
-          height: auto;
-        }
-        
-        .close-modal {
-          position: absolute;
-          top: 15px;
-          right: 35px;
-          color: #f1f1f1;
-          font-size: 40px;
-          font-weight: bold;
-          cursor: pointer;
-        }
       </style>
     `;
   }
 
-  /**
-   * Generate JavaScript for enhanced functionality
-   */
   generateEnhancedJS() {
     return `
       <script type="text/javascript">
-        // Image modal functionality
         function openImageModal(img) {
           const modal = document.getElementById('imageModal') || createImageModal();
           const modalImg = modal.querySelector('.modal-image');
@@ -341,17 +882,8 @@ class RSSManager {
           \`;
           document.body.appendChild(modal);
           
-          // Close modal on click
           modal.addEventListener('click', function(e) {
             if (e.target === modal || e.target.className === 'close-modal') {
-              modal.style.display = 'none';
-              document.body.style.overflow = 'auto';
-            }
-          });
-          
-          // Close on escape key
-          document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape' && modal.style.display === 'block') {
               modal.style.display = 'none';
               document.body.style.overflow = 'auto';
             }
@@ -360,15 +892,12 @@ class RSSManager {
           return modal;
         }
         
-        // Auto-play videos when they come into view
-        function setupVideoAutoplay() {
+        document.addEventListener('DOMContentLoaded', function() {
           const videos = document.querySelectorAll('.media-video');
           const observer = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
               if (entry.isIntersecting) {
-                entry.target.play().catch(() => {
-                  // Auto-play failed, that's okay
-                });
+                entry.target.play().catch(() => {});
               } else {
                 entry.target.pause();
               }
@@ -376,40 +905,14 @@ class RSSManager {
           }, { threshold: 0.5 });
           
           videos.forEach(video => observer.observe(video));
-        }
-        
-        // Initialize when DOM is ready
-        document.addEventListener('DOMContentLoaded', function() {
-          setupVideoAutoplay();
         });
-        
-        // Lazy loading for images
-        function setupLazyLoading() {
-          const images = document.querySelectorAll('.media-image[loading="lazy"]');
-          const imageObserver = new IntersectionObserver((entries, observer) => {
-            entries.forEach(entry => {
-              if (entry.isIntersecting) {
-                const img = entry.target;
-                img.src = img.dataset.src || img.src;
-                img.classList.remove('lazy');
-                imageObserver.unobserve(img);
-              }
-            });
-          });
-          
-          images.forEach(img => imageObserver.observe(img));
-        }
       </script>
     `;
   }
 
-  /**
-   * Format message body for RSS feed with enhanced link handling
-   */
   formatMessageForRSS(body) {
     if (!body) return '';
     
-    // Escape HTML characters
     let formatted = body
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
@@ -417,197 +920,36 @@ class RSSManager {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
     
-    // Enhanced URL detection and formatting
     const urlRegex = /(https?:\/\/[^\s]+)/g;
     formatted = formatted.replace(urlRegex, (url) => {
-      // Special handling for Google Drive links
       if (url.includes('drive.google.com')) {
         return `<div class="link-preview"><a href="${url}" target="_blank">📁 Google Drive: ${url}</a></div>`;
-      }
-      // Special handling for YouTube links
-      else if (url.includes('youtube.com') || url.includes('youtu.be')) {
+      } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
         return `<div class="link-preview"><a href="${url}" target="_blank">🎥 YouTube: ${url}</a></div>`;
-      }
-      // General links
-      else {
+      } else {
         return `<div class="link-preview"><a href="${url}" target="_blank">🔗 ${url}</a></div>`;
       }
     });
     
-    // Convert newlines to <br> tags
     formatted = formatted.replace(/\n/g, '<br>');
-    
     return formatted;
   }
 
-  /**
-   * Enhanced feed update with media support
-   */
-  updateFeed(messageGroup, messageHistory) {
-    if (!this.rssFeed) return;
-
-    let description = '';
-    let title = `Messages from ${messageGroup.author}`;
-    let mediaCount = 0;
-    let linkCount = 0;
-    let hasImages = false;
-    let hasVideos = false;
-    let hasAudio = false;
-
-    // Add CSS and JS to the beginning of description
-    description += this.generateEnhancedCSS();
-    description += this.generateEnhancedJS();
-    
-    // Start message container
-    description += '<div class="message-container">';
-    description += `<div class="message-header">
-      <div class="author-name">${messageGroup.author}</div>
-      <div class="message-time">${new Date(messageGroup.timestamp * 1000).toLocaleString()}</div>
-    </div>`;
-    description += '<div class="message-content">';
-
-    // Process each message in the group
-    messageGroup.messages.forEach((msg, index) => {
-      if (msg.type === 'chat' && msg.body) {
-        // Text message
-        const formattedBody = this.formatMessageForRSS(msg.body);
-        description += `<div class="text-message">${formattedBody}</div>`;
-        
-        // Count links in the message
-        const links = msg.body.match(/https?:\/\/[^\s]+/g) || [];
-        linkCount += links.length;
-      } else if (msg.hasMedia && msg.mediaPath) {
-        // Media message
-        mediaCount++;
-        const mediaHTML = this.generateMediaHTML(msg.mediaPath, msg.body, msg.type);
-        description += mediaHTML;
-        
-        // Track media types
-        switch (msg.type) {
-          case 'image': hasImages = true; break;
-          case 'video': hasVideos = true; break;
-          case 'audio':
-          case 'ptt': hasAudio = true; break;
-        }
-      } else if (msg.hasMedia) {
-        // Media without file (failed download)
-        mediaCount++;
-        const mediaType = msg.type.toUpperCase();
-        const mediaDescription = msg.body ? this.formatMessageForRSS(msg.body) : 'Media file (failed to download)';
-        description += `<div class="media-container generic-container">
-          <div class="document-info">
-            <div class="document-icon">❌</div>
-            <div class="document-details">
-              <strong>[${mediaType} - Download Failed]</strong>
-              <div class="media-caption">${mediaDescription}</div>
-            </div>
-          </div>
-        </div>`;
-      }
-    });
-
-    // Close message content and add stats
-    description += '</div>';
-    
-    // Add message statistics
-    const stats = [];
-    if (messageGroup.messages.length > 1) {
-      stats.push(`${messageGroup.messages.length} messages`);
-    }
-    if (mediaCount > 0) {
-      const mediaTypes = [];
-      if (hasImages) mediaTypes.push('📸 images');
-      if (hasVideos) mediaTypes.push('🎥 videos');
-      if (hasAudio) mediaTypes.push('🎵 audio');
-      stats.push(`${mediaCount} media file${mediaCount > 1 ? 's' : ''} (${mediaTypes.join(', ')})`);
-    }
-    if (linkCount > 0) {
-      stats.push(`🔗 ${linkCount} link${linkCount > 1 ? 's' : ''}`);
-    }
-
-    if (stats.length > 0) {
-      description += `<div class="message-stats">${stats.join(' • ')}</div>`;
-    }
-    
-    // Close message container
-    description += '</div>';
-
-    // Create enhanced RSS item
-    const rssItem = {
-      title: title,
-      description: description,
-      url: `http://localhost:${config.server.port}/message/${messageGroup.id}`,
-      date: new Date(messageGroup.timestamp * 1000),
-      guid: messageGroup.id,
-      categories: [messageGroup.type, 'whatsapp'],
-      custom_elements: [
-        { 'content:encoded': `<![CDATA[${description}]]>` },
-        { 'dc:creator': messageGroup.author }
-      ]
+  formatStatsResult(result) {
+    return {
+      totalMessages: result[0]?.total_messages || 0,
+      mediaMessages: result[0]?.media_messages || 0,
+      uniqueUsers: result[0]?.unique_users || 0,
+      mediaTypes: result.filter(r => r.media_type).reduce((acc, r) => {
+        acc[r.media_type] = r.type_count;
+        return acc;
+      }, {})
     };
-
-    // Add media RSS extensions if there are media files
-    if (mediaCount > 0) {
-      rssItem.enclosure = messageGroup.messages
-        .filter(msg => msg.hasMedia && msg.mediaPath)
-        .map(msg => ({
-          url: `http://localhost:${config.server.port}/media/${path.basename(msg.mediaPath)}`,
-          type: this.getMimeType(msg.type),
-          length: 0 // You could calculate file size here
-        }))[0]; // RSS only supports one enclosure, so take the first
-    }
-
-    this.rssFeed.item(rssItem);
-
-    // Save enhanced feed
-    try {
-      fs.ensureDirSync('./rss');
-      
-      // Save RSS feed with proper formatting
-      const rssXml = this.rssFeed.xml({ indent: true });
-      fs.writeFileSync('./rss/feed.xml', rssXml);
-      
-      // Save message history
-      fs.writeFileSync('./rss/messages.json', JSON.stringify(messageHistory, null, 2));
-      
-      // Enhanced logging
-      console.log('✅ Enhanced RSS feed exported');
-      console.log(`   📊 Total message groups: ${messageHistory.length}`);
-      console.log(`   📬 Latest group: ${messageGroup.messages.length} message${messageGroup.messages.length > 1 ? 's' : ''}`);
-      
-      if (mediaCount > 0) {
-        const mediaTypesList = [];
-        if (hasImages) mediaTypesList.push('📸 images');
-        if (hasVideos) mediaTypesList.push('🎥 videos');  
-        if (hasAudio) mediaTypesList.push('🎵 audio');
-        console.log(`   🎬 Media: ${mediaCount} files (${mediaTypesList.join(', ')})`);
-      }
-      
-      if (linkCount > 0) {
-        console.log(`   🔗 Links: ${linkCount}`);
-      }
-      
-    } catch (error) {
-      console.error('❌ Error updating enhanced RSS feed:', error);
-    }
   }
 
-  /**
-   * Get MIME type for media type
-   */
-  getMimeType(type) {
-    const mimeTypes = {
-      'image': 'image/jpeg',
-      'video': 'video/mp4', 
-      'audio': 'audio/mpeg',
-      'ptt': 'audio/ogg',
-      'document': 'application/octet-stream'
-    };
-    return mimeTypes[type] || 'application/octet-stream';
-  }
-
-  reset() {
+  async reset() {
     this.initialize();
+    this.cache.clear();
   }
 }
 

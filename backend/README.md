@@ -209,3 +209,17 @@ Resolution: Considers image dimensions
 40% weight for image quality (sharpness, brightness, contrast, color)
 60% weight for face-related criteria
 Images without faces can still be selected if they have exceptional quality
+
+
+## POSTGRE SQL queries:
+
+psql -U mrunal -d whatsappmonitor
+
+\l    ->list all databases
+
+\dt   ->list all tables
+
+\du   ->list all users
+
+select * from users;
+
