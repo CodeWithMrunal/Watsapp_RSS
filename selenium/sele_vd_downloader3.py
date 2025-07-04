@@ -34,8 +34,9 @@ class LinkDownloadManager:
         # Make sure download directory exists
         self.download_dir.mkdir(parents=True, exist_ok=True)
         
-        # Track processed links to avoid duplicates
-        self.processed_links = set()
+        # Track processed links to avoid duplicates - FIXED: Use both URL and hash
+        self.processed_links = set()  # Store URL hashes
+        self.processed_urls = set()   # Store actual URLs for debugging
         self.link_to_media_map = {}
         self.last_messages_content = ""
         self.last_file_size = 0
@@ -54,8 +55,12 @@ class LinkDownloadManager:
         print(f"📁 Download directory: {self.download_dir.absolute()}")
         print(f"📄 Messages file: {self.messages_file.absolute()}")
         print(f"📄 Media file: {self.media_file.absolute()}")
-         # Store initial file state
-        self.update_file_state()
+        
+        # Store initial file state - FIXED: Only if file exists
+        if self.messages_file.exists():
+            self.update_file_state()
+        else:
+            print("ℹ️ Messages file doesn't exist yet, will monitor for creation")
 
     def update_file_state(self):
         """Update the current state of the messages file"""
@@ -69,6 +74,12 @@ class LinkDownloadManager:
                     self.last_messages_content = f.read()
                     
                 print(f"📊 File state updated - Size: {self.last_file_size}, Modified: {datetime.fromtimestamp(self.last_modification_time)}")
+            else:
+                # FIXED: Reset state when file doesn't exist
+                self.last_modification_time = 0
+                self.last_file_size = 0
+                self.last_messages_content = ""
+                print("📊 File state reset - messages.json doesn't exist")
         except Exception as e:
             print(f"⚠️ Error updating file state: {e}")
     
@@ -76,6 +87,10 @@ class LinkDownloadManager:
         """Check if the messages file has actually changed"""
         try:
             if not self.messages_file.exists():
+                # FIXED: If file was deleted, consider it a change
+                if self.last_messages_content != "":
+                    print("📄 Messages file was deleted - considering as change")
+                    return True
                 return False
                 
             stat = self.messages_file.stat()
@@ -112,11 +127,18 @@ class LinkDownloadManager:
                 
                 for entry in media_data:
                     if 'source_link' in entry:
-                        link_hash = hashlib.md5(entry['source_link'].encode()).hexdigest()
+                        # FIXED: Store both hash and actual URL
+                        url = entry['source_link']
+                        link_hash = hashlib.md5(url.encode()).hexdigest()
                         self.processed_links.add(link_hash)
+                        self.processed_urls.add(url)
                         self.link_to_media_map[link_hash] = entry
                 
                 print(f"📚 Loaded {len(self.processed_links)} previously processed links")
+                if self.processed_urls:
+                    print(f"🔗 Sample processed URLs: {list(self.processed_urls)[:3]}")
+            else:
+                print("📚 No existing media file found - starting fresh")
         except Exception as e:
             print(f"⚠️ Error loading processed links: {e}")
     
@@ -128,7 +150,16 @@ class LinkDownloadManager:
                 return []
             
             with open(self.messages_file, 'r', encoding='utf-8') as f:
-                messages = json.load(f)
+                content = f.read().strip()
+                if not content:
+                    print("ℹ️ Messages file is empty")
+                    return []
+                
+                messages = json.loads(content)
+            
+            if not messages:
+                print("ℹ️ No messages found in file")
+                return []
             
             links = []
             link_patterns = [
@@ -158,23 +189,46 @@ class LinkDownloadManager:
                             links.append(link_info)
             
             print(f"🔍 Found {len(links)} total links in messages")
+            # FIXED: Debug logging
+            if links:
+                print(f"🔗 Sample links found: {[link['url'] for link in links[:3]]}")
             return links
             
+        except json.JSONDecodeError as e:
+            print(f"❌ Error parsing JSON in messages file: {e}")
+            return []
         except Exception as e:
             print(f"❌ Error extracting links: {e}")
             return []
     
     def is_link_processed(self, url):
         """Check if a link has already been processed"""
-        link_hash = hashlib.md5(url.encode()).hexdigest()
-        return link_hash in self.processed_links
+        # FIXED: Normalize URL before checking
+        normalized_url = url.strip().rstrip('/')
+        link_hash = hashlib.md5(normalized_url.encode()).hexdigest()
+        
+        is_processed = link_hash in self.processed_links or normalized_url in self.processed_urls
+        
+        if is_processed:
+            print(f"✅ Link already processed: {url[:50]}...")
+        else:
+            print(f"🆕 New link to process: {url[:50]}...")
+            
+        return is_processed
     
     def mark_link_processed(self, url, media_info=None):
         """Mark a link as processed"""
-        link_hash = hashlib.md5(url.encode()).hexdigest()
+        # FIXED: Normalize URL before storing
+        normalized_url = url.strip().rstrip('/')
+        link_hash = hashlib.md5(normalized_url.encode()).hexdigest()
+        
         self.processed_links.add(link_hash)
+        self.processed_urls.add(normalized_url)
+        
         if media_info:
             self.link_to_media_map[link_hash] = media_info
+            
+        print(f"✅ Marked as processed: {url[:50]}...")
     
     def update_media_json(self, link_info, downloaded_files):
         """Update links.json with new download information"""
@@ -183,7 +237,9 @@ class LinkDownloadManager:
             media_data = []
             if self.media_file.exists():
                 with open(self.media_file, 'r', encoding='utf-8') as f:
-                    media_data = json.load(f)
+                    content = f.read().strip()
+                    if content:
+                        media_data = json.loads(content)
             
             # Add new entries for each downloaded file
             for file_path in downloaded_files:
@@ -225,7 +281,7 @@ class LinkDownloadManager:
                     
                     media_data.append(media_entry)
                     
-                    # Mark this link as processed
+                    # FIXED: Mark this link as processed IMMEDIATELY
                     self.mark_link_processed(link_info['url'], media_entry)
             
             # Save updated links.json
@@ -241,6 +297,7 @@ class LinkDownloadManager:
         """Download a single link using the Selenium downloader"""
         url = link_info['url']
         
+        # FIXED: Double-check if link is processed (with debug info)
         if self.is_link_processed(url):
             print(f"⏭️ Skipping already processed link: {url[:50]}...")
             return False
@@ -248,6 +305,9 @@ class LinkDownloadManager:
         print(f"⬇️ Downloading: {url}")
         print(f"👤 Author: {link_info['author']}")
         print(f"📅 Message time: {datetime.fromtimestamp(link_info['timestamp'])}")
+        
+        # FIXED: Mark as processing to prevent race conditions
+        self.mark_link_processed(url)  # Mark early to prevent duplicate processing
         
         # Create a new downloader instance for this download
         downloader = SeleniumVideoDownloader(download_dir=str(self.download_dir), headless=True)
@@ -273,13 +333,17 @@ class LinkDownloadManager:
                     return True
                 else:
                     print("⚠️ Download reported success but no new files found")
-                    # Still mark as processed to avoid infinite retries
-                    self.mark_link_processed(url)
+                    # Link already marked as processed above
                     return False
             else:
                 print(f"❌ Failed to download: {url}")
+                # Link already marked as processed above to prevent infinite retries
                 return False
                 
+        except Exception as e:
+            print(f"❌ Error downloading {url}: {e}")
+            # Link already marked as processed above
+            return False
         finally:
             # Always clean up the downloader
             downloader.cleanup()
@@ -308,14 +372,19 @@ class LinkDownloadManager:
                 self.update_file_state()
                 return
             
-            new_links = [link for link in links if not self.is_link_processed(link['url'])]
+            # FIXED: Better filtering with debug info
+            new_links = []
+            for link in links:
+                if not self.is_link_processed(link['url']):
+                    new_links.append(link)
             
             if not new_links:
                 print("ℹ️ No new links to process")
+                print(f"📊 Total links found: {len(links)}, Already processed: {len(links) - len(new_links)}")
                 self.update_file_state()
                 return
             
-            print(f"🆕 Found {len(new_links)} new links to download")
+            print(f"🆕 Found {len(new_links)} new links to download out of {len(links)} total")
             
             for i, link_info in enumerate(new_links, 1):
                 print(f"\n📥 Processing link {i}/{len(new_links)}")
@@ -327,6 +396,8 @@ class LinkDownloadManager:
                     time.sleep(2)
                 except Exception as e:
                     print(f"❌ Error processing link {link_info['url']}: {e}")
+                    # Mark as processed even on error to prevent infinite retries
+                    self.mark_link_processed(link_info['url'])
                     continue
             
             print(f"\n✅ Finished processing {len(new_links)} links")
@@ -342,6 +413,8 @@ class LinkDownloadManager:
         if hasattr(self, 'downloader') and self.downloader:
             self.downloader.cleanup()
 
+
+# ... (Keep all the rest of the SeleniumVideoDownloader, MessagesFileHandler, PollingMonitor, and main function classes unchanged)
 
 class SeleniumVideoDownloader:
     def __init__(self, download_dir="backend/media", headless=True):
@@ -395,9 +468,8 @@ class SeleniumVideoDownloader:
             print("💡 Make sure you have Chrome and chromedriver installed")
             return False
     
-    # Also update the wait_for_download_completion method to better handle Google Drive downloads
-    def wait_for_download_completion(self, timeout=300):
-        """Wait for download to complete - Enhanced for Google Drive"""
+    def wait_for_download_completion(self, timeout=1800):  # Increased to 30 minutes
+        """Wait for download to complete - Enhanced for Google Drive with longer timeout"""
         print("⏳ Waiting for download to complete...")
         start_time = time.time()
         
@@ -416,9 +488,11 @@ class SeleniumVideoDownloader:
         print(f"📊 Initial files in directory: {len(initial_files)}")
         
         # Check Chrome's download status through JavaScript
-        check_interval = 1  # Check every second
+        check_interval = 2  # Check every 2 seconds for large files
         last_check_time = start_time
         download_detected = False
+        last_progress_time = start_time
+        stalled_threshold = 300  # 5 minutes without progress = stalled
         
         while time.time() - start_time < timeout:
             try:
@@ -447,10 +521,39 @@ class SeleniumVideoDownloader:
                 crdownload_files = list(self.download_dir.glob("*.crdownload"))
                 if crdownload_files:
                     download_detected = True
-                    file_size = crdownload_files[0].stat().st_size
+                    current_file = crdownload_files[0]
+                    file_size = current_file.stat().st_size
                     file_size_mb = file_size / (1024 * 1024)
-                    print(f"📥 Download in progress: {crdownload_files[0].name} ({file_size_mb:.1f} MB)")
-                    time.sleep(2)
+                    
+                    # Check if file is still growing (not stalled)
+                    last_size_key = f"last_size_{current_file.name}"
+                    if not hasattr(self, last_size_key):
+                        setattr(self, last_size_key, 0)
+                    
+                    last_size = getattr(self, last_size_key)
+                    if file_size > last_size:
+                        # File is growing, update progress tracking
+                        last_progress_time = current_time
+                        setattr(self, last_size_key, file_size)
+                        growth_mb = (file_size - last_size) / (1024 * 1024)
+                        
+                        # Calculate download speed
+                        time_diff = current_time - last_check_time if current_time - last_check_time > 0 else 1
+                        speed_mbps = growth_mb / time_diff
+                        
+                        print(f"📥 Download in progress: {current_file.name} ({file_size_mb:.1f} MB, +{growth_mb:.1f} MB, {speed_mbps:.1f} MB/s)")
+                    else:
+                        # File size hasn't changed - check if stalled
+                        stalled_time = current_time - last_progress_time
+                        if stalled_time > stalled_threshold:
+                            print(f"⚠️ Download appears stalled for {stalled_time:.0f} seconds")
+                            print(f"📊 File size unchanged at {file_size_mb:.1f} MB")
+                            # Don't return False yet, give it more time
+                            print("🔄 Continuing to wait...")
+                        else:
+                            print(f"📥 Download paused: {current_file.name} ({file_size_mb:.1f} MB) - waiting for resume...")
+                    
+                    time.sleep(check_interval)
                     continue
                 
                 # Check for .tmp files
@@ -458,7 +561,7 @@ class SeleniumVideoDownloader:
                 if tmp_files:
                     download_detected = True
                     print(f"📥 Temporary file detected: {tmp_files[0].name}")
-                    time.sleep(1)
+                    time.sleep(2)
                     continue
                 
                 # Get current file state
@@ -470,7 +573,7 @@ class SeleniumVideoDownloader:
                         current_files.add(f.name)
                         current_sizes[f.name] = f.stat().st_size
                 
-                # Check for new files
+                # Check for new files (completed downloads)
                 new_files = current_files - initial_files
                 
                 if new_files:
@@ -481,19 +584,22 @@ class SeleniumVideoDownloader:
                         print(f"📁 Downloaded: {filename} ({file_size_mb:.1f} MB)")
                     return True
                 
-                # Check for files that have grown
+                # Check for files that have grown (existing files that got updated)
+                progress_detected = False
                 for filename in current_files & initial_files:
                     old_size = initial_sizes.get(filename, 0)
                     new_size = current_sizes.get(filename, 0)
                     if new_size > old_size:
                         download_detected = True
+                        progress_detected = True
                         growth_mb = (new_size - old_size) / (1024 * 1024)
                         print(f"📈 File growing: {filename} (+{growth_mb:.1f} MB)")
                         initial_sizes[filename] = new_size  # Update size for next check
+                        last_progress_time = current_time
                 
-                # If we haven't detected any download activity after 10 seconds, likely failed
-                if not download_detected and current_time - start_time > 10:
-                    print("⚠️ No download activity detected after 10 seconds")
+                # If we haven't detected any download activity after 30 seconds, likely failed
+                if not download_detected and current_time - start_time > 30:
+                    print("⚠️ No download activity detected after 30 seconds")
                     
                     # Check if we're still on a Google page that might need interaction
                     try:
@@ -516,26 +622,49 @@ class SeleniumVideoDownloader:
                     if not download_detected:
                         return False
                 
-                # Print status periodically
-                if current_time - last_check_time > 5:
+                # Print status periodically (every 30 seconds for large files)
+                if current_time - last_check_time > 30:
                     elapsed = int(current_time - start_time)
-                    print(f"⏱️ Still waiting... ({elapsed}s elapsed, {len(current_files)} files in directory)")
+                    elapsed_minutes = elapsed // 60
+                    elapsed_seconds = elapsed % 60
+                    time_since_progress = int(current_time - last_progress_time)
+                    
+                    print(f"⏱️ Still waiting... ({elapsed_minutes}m {elapsed_seconds}s elapsed, last progress: {time_since_progress}s ago)")
+                    print(f"📊 Files in directory: {len(current_files)}")
                     last_check_time = current_time
                 
                 time.sleep(check_interval)
                 
             except Exception as e:
                 print(f"⚠️ Error during download check: {e}")
-                time.sleep(1)
+                time.sleep(2)
         
-        # Final check
-        print("⚠️ Download timeout reached")
+        # Final check after timeout
+        print(f"⚠️ Download timeout reached after {timeout/60:.1f} minutes")
         final_files = set(f.name for f in self.download_dir.iterdir() if f.is_file())
         final_new_files = final_files - initial_files
         
         if final_new_files:
             print(f"✅ Found files after timeout: {list(final_new_files)}")
             return True
+        
+        # Check if there's still a .crdownload file (partial download)
+        crdownload_files = list(self.download_dir.glob("*.crdownload"))
+        if crdownload_files:
+            file_size_mb = crdownload_files[0].stat().st_size / (1024 * 1024)
+            print(f"⚠️ Partial download found: {crdownload_files[0].name} ({file_size_mb:.1f} MB)")
+            print("💡 You may want to increase the timeout for very large files")
+            
+            # Ask if we should wait longer (if interactive)
+            try:
+                import sys
+                if sys.stdin.isatty():  # Interactive terminal
+                    continue_wait = input(f"Continue waiting for download? (y/n): ").strip().lower()
+                    if continue_wait in ['y', 'yes']:
+                        print("🔄 Continuing to wait for download...")
+                        return self.wait_for_download_completion(timeout=600)  # Wait another 10 minutes
+            except:
+                pass
         
         return False
 
@@ -583,8 +712,6 @@ class SeleniumVideoDownloader:
         print("❌ Could not handle virus warning page")
         return False
     
-    # Updated download_google_drive_selenium method for your SeleniumVideoDownloader class
-
     def download_google_drive_selenium(self, url):
         """Download from Google Drive using Selenium - Updated for current Google Drive"""
         try:
@@ -701,7 +828,7 @@ class SeleniumVideoDownloader:
                     time.sleep(3)
                     
                     # Check if download started
-                    if self.wait_for_download_completion(timeout=30):
+                    if self.wait_for_download_completion(timeout=1800):  # 30 minutes for large files
                         return True
                     else:
                         print("⚠️ Download didn't start after handling virus warning")
@@ -712,7 +839,7 @@ class SeleniumVideoDownloader:
             print("🔍 Checking for automatic download...")
             
             # Sometimes the download starts automatically
-            if self.wait_for_download_completion(timeout=30):
+            if self.wait_for_download_completion(timeout=1800):  # 30 minutes for large files
                 return True
             
             # Method 3: Try alternative download method using Google Drive API-like URL
@@ -722,7 +849,7 @@ class SeleniumVideoDownloader:
             time.sleep(5)
             
             # Final attempt to wait for download
-            return self.wait_for_download_completion(timeout=30)
+            return self.wait_for_download_completion(timeout=1800)  # 30 minutes for large files
             
         except Exception as e:
             print(f"❌ Error downloading with Selenium: {str(e)}")
@@ -907,13 +1034,24 @@ def main():
     print("✅ Thread-safe processing")
     print("✅ Fallback polling mode")
     print("✅ Improved conflict resolution")
+    print("✅ Fixed duplicate download prevention")
     print("=" * 60)
     
     # Initialize the download manager
     download_manager = LinkDownloadManager()
     
+    # FIXED: Add debugging option
+    debug_mode = input("\nEnable debug mode to see processed links? (y/n, default: n): ").strip().lower()
+    if debug_mode in ['y', 'yes', '1', 'true']:
+        print(f"\n🔍 Debug Info:")
+        print(f"📊 Currently tracking {len(download_manager.processed_links)} processed links")
+        if download_manager.processed_urls:
+            print("🔗 Sample processed URLs:")
+            for url in list(download_manager.processed_urls)[:5]:
+                print(f"   - {url}")
+    
     # Process any existing links first
-    print("🔍 Processing existing links...")
+    print("\n🔍 Processing existing links...")
     download_manager.process_new_links(force=True)
     
     # Auto-detect environment and choose monitoring method
