@@ -8,8 +8,12 @@ const path = require('path');
 const config = require('./config');
 const FileUtils = require('./utils/fileUtils');
 
+// Import database connection
+const dbConnection = require('./database/connection');
+
 // Import services
 const RSSManager = require('./services/RSSManager');
+const RSSManagerDB = require('./services/RSSManagerDB'); // NEW: MongoDB RSS Manager
 const WhatsAppManager = require('./services/WhatsAppManager');
 const SocketManager = require('./services/SocketManager');
 
@@ -27,18 +31,29 @@ class WhatsAppMonitorServer {
     this.rssManager = null;
     this.whatsappManager = null;
     this.socketManager = null;
+    this.dbConnected = false;
 
     this.initialize();
   }
 
-  initialize() {
+  async initialize() {
     console.log('Server.js starting...');
     
     // Ensure required directories exist
     FileUtils.ensureDirectories();
     
-    // Initialize services
-    this.rssManager = new RSSManager();
+    // Try to connect to MongoDB
+    await this.initializeDatabase();
+    
+    // Initialize services based on database availability
+    if (this.dbConnected) {
+      console.log('✅ Using MongoDB-based RSS Manager');
+      this.rssManager = new RSSManagerDB();
+    } else {
+      console.log('⚠️  Using file-based RSS Manager (MongoDB not available)');
+      this.rssManager = new RSSManager();
+    }
+    
     this.whatsappManager = new WhatsAppManager(this.io, this.rssManager);
     this.socketManager = new SocketManager(this.io, this.whatsappManager);
     
@@ -47,6 +62,27 @@ class WhatsAppMonitorServer {
     this.setupRoutes();
     
     console.log('✅ Server initialized successfully');
+  }
+
+  async initializeDatabase() {
+    try {
+      await dbConnection.connect();
+      this.dbConnected = true;
+      console.log('✅ MongoDB connected successfully');
+      
+      // Ensure indexes are created
+      await dbConnection.ensureIndexes();
+      console.log('✅ Database indexes ensured');
+      
+      // Check database health
+      const health = await dbConnection.healthCheck();
+      console.log('📊 Database health:', health);
+      
+    } catch (error) {
+      console.error('❌ MongoDB connection failed:', error.message);
+      console.log('⚠️  Server will continue without database features');
+      this.dbConnected = false;
+    }
   }
 
   setupMiddleware() {
@@ -104,6 +140,11 @@ class WhatsAppMonitorServer {
     // API routes
     this.app.use('/api', createApiRoutes(this.whatsappManager));
     
+    // Database API routes (only if connected)
+    if (this.dbConnected) {
+      this.setupDatabaseRoutes();
+    }
+    
     // Enhanced RSS feed route - redirect to web view by default
     this.app.get('/rss', (req, res) => {
       res.redirect('/api/rss-view');
@@ -120,10 +161,15 @@ class WhatsAppMonitorServer {
     });
     
     // Health check endpoint with enhanced information
-    this.app.get('/health', (req, res) => {
+    this.app.get('/health', async (req, res) => {
       const status = this.whatsappManager.getStatus();
       const uptime = process.uptime();
       const memoryUsage = process.memoryUsage();
+      
+      let dbHealth = { status: 'disconnected' };
+      if (this.dbConnected) {
+        dbHealth = await dbConnection.healthCheck();
+      }
       
       res.json({
         status: 'OK',
@@ -143,6 +189,7 @@ class WhatsAppMonitorServer {
             selectedGroup: status.selectedGroup,
             cachedGroups: status.cachedGroups
           },
+          database: dbHealth,
           rss: this.rssManager ? 'initialized' : 'not initialized',
           socket: this.socketManager ? 'active' : 'inactive'
         },
@@ -151,34 +198,38 @@ class WhatsAppMonitorServer {
           rssXml: `/rss/feed.xml`,
           mediaFiles: `/media/`,
           api: `/api/`,
-          health: `/health`
+          health: `/health`,
+          stats: this.dbConnected ? `/api/stats` : null,
+          analytics: this.dbConnected ? `/api/analytics` : null
         }
       });
     });
     
     // API documentation endpoint
     this.app.get('/api-docs', (req, res) => {
-      res.json({
+      const docs = {
         name: 'WhatsApp Monitor API',
-        version: '1.0.0',
-        description: 'API for monitoring WhatsApp messages with RSS feed generation',
+        version: '2.0.0',
+        description: 'API for monitoring WhatsApp messages with RSS feed generation and MongoDB support',
         endpoints: {
-          'GET /health': 'Server health and status information',
-          'GET /api/status': 'WhatsApp client status',
-          'GET /api/groups': 'List available WhatsApp groups',
-          'POST /api/select-group': 'Select a group to monitor',
-          'GET /api/group-participants': 'Get participants of selected group',
-          'POST /api/select-user': 'Filter messages by specific user',
-          'POST /api/fetch-history': 'Fetch message history',
-          'GET /api/messages': 'Get current messages',
-          'POST /api/initialize': 'Initialize WhatsApp client',
-          'POST /api/logout': 'Logout and clear session',
-          'POST /api/backup-messages': 'Backup messages to file',
-          'GET /api/rss-view': 'Enhanced web view of RSS feed',
-          'GET /api/message/:id': 'View individual message',
-          'GET /api/media-info/:filename': 'Get media file information',
-          'GET /rss/feed.xml': 'RSS XML feed',
-          'GET /media/:filename': 'Media file access'
+          core: {
+            'GET /health': 'Server health and status information',
+            'GET /api/status': 'WhatsApp client status',
+            'GET /api/groups': 'List available WhatsApp groups',
+            'POST /api/select-group': 'Select a group to monitor',
+            'GET /api/group-participants': 'Get participants of selected group',
+            'POST /api/select-user': 'Filter messages by specific user',
+            'POST /api/fetch-history': 'Fetch message history',
+            'GET /api/messages': 'Get current messages',
+            'POST /api/initialize': 'Initialize WhatsApp client',
+            'POST /api/logout': 'Logout and clear session',
+            'POST /api/backup-messages': 'Backup messages to file',
+            'GET /api/rss-view': 'Enhanced web view of RSS feed',
+            'GET /api/message/:id': 'View individual message',
+            'GET /api/media-info/:filename': 'Get media file information',
+            'GET /rss/feed.xml': 'RSS XML feed',
+            'GET /media/:filename': 'Media file access'
+          }
         },
         websocket: {
           events: {
@@ -192,7 +243,23 @@ class WhatsAppMonitorServer {
             loading_progress: 'Loading progress update'
           }
         }
-      });
+      };
+      
+      // Add database endpoints if connected
+      if (this.dbConnected) {
+        docs.endpoints.database = {
+          'GET /api/stats/:groupId': 'Get message statistics for a group',
+          'GET /api/analytics/:groupId': 'Get analytics for a group',
+          'GET /api/search': 'Search messages (query param: q)',
+          'GET /api/authors/top': 'Get top authors',
+          'GET /api/links/popular': 'Get popular links',
+          'GET /api/media/stats': 'Get media storage statistics',
+          'POST /api/migrate': 'Migrate JSON data to MongoDB',
+          'GET /api/db/health': 'Database health check'
+        };
+      }
+      
+      res.json(docs);
     });
     
     // Catch-all route for SPA-like behavior
@@ -213,6 +280,112 @@ class WhatsAppMonitorServer {
         message: isDevelopment ? err.message : 'Something went wrong',
         timestamp: new Date().toISOString()
       });
+    });
+  }
+
+  // NEW: Setup database-specific routes
+  setupDatabaseRoutes() {
+    const Message = require('./database/models/Message');
+    const Media = require('./database/models/Media');
+    const { Group, Author, Link } = require('./database/models/Group');
+    const Analytics = require('./database/models/Analytics');
+    
+    // Message statistics
+    this.app.get('/api/stats/:groupId', async (req, res) => {
+      try {
+        const stats = await Message.getGroupStatistics(req.params.groupId);
+        res.json(stats);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+    
+    // Analytics endpoint
+    this.app.get('/api/analytics/:groupId', async (req, res) => {
+      try {
+        const { days = 30 } = req.query;
+        const trends = await Analytics.getGroupTrends(req.params.groupId, parseInt(days));
+        const summary = await Analytics.getGroupSummary(req.params.groupId);
+        
+        res.json({ trends, summary });
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+    
+    // Search messages
+    this.app.get('/api/search', async (req, res) => {
+      try {
+        const { q, limit = 50 } = req.query;
+        if (!q) {
+          return res.status(400).json({ error: 'Search query (q) is required' });
+        }
+        
+        const results = await Message.searchMessages(q, { limit: parseInt(limit) });
+        res.json(results);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+    
+    // Top authors
+    this.app.get('/api/authors/top', async (req, res) => {
+      try {
+        const { limit = 10, groupId } = req.query;
+        const topAuthors = await Author.getTopAuthors(parseInt(limit), groupId);
+        res.json(topAuthors);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+    
+    // Popular links
+    this.app.get('/api/links/popular', async (req, res) => {
+      try {
+        const { groupId, days = 7 } = req.query;
+        const links = await Link.getPopularLinks(groupId, parseInt(days));
+        res.json(links);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+    
+    // Media statistics
+    this.app.get('/api/media/stats', async (req, res) => {
+      try {
+        const { groupId } = req.query;
+        const stats = await Media.getStorageStatistics(groupId);
+        res.json(stats);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+    
+    // Database health
+    this.app.get('/api/db/health', async (req, res) => {
+      try {
+        const health = await dbConnection.healthCheck();
+        res.json(health);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+    
+    // Migration endpoint
+    this.app.post('/api/migrate', async (req, res) => {
+      try {
+        const JSONToMongoDBMigrator = require('./database/migrations/migrateFromJSON');
+        const migrator = new JSONToMongoDBMigrator();
+        
+        const result = await migrator.migrate({
+          clearExisting: req.body.clearExisting || false,
+          generateAnalytics: req.body.generateAnalytics !== false
+        });
+        
+        res.json({ success: result, message: 'Migration completed' });
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
     });
   }
 
@@ -243,6 +416,14 @@ class WhatsAppMonitorServer {
       console.log(`🔍 API documentation: http://localhost:${PORT}/api-docs`);
       console.log(`💚 Health check: http://localhost:${PORT}/health`);
       
+      if (this.dbConnected) {
+        console.log(`📊 Database: Connected to MongoDB`);
+        console.log(`📈 Analytics API: http://localhost:${PORT}/api/analytics/:groupId`);
+        console.log(`🔎 Search API: http://localhost:${PORT}/api/search?q=query`);
+      } else {
+        console.log(`⚠️  Database: Running without MongoDB (file-based mode)`);
+      }
+      
       // Log available endpoints
       console.log('\n📋 Available endpoints:');
       console.log('   Main RSS View: /');
@@ -251,7 +432,18 @@ class WhatsAppMonitorServer {
       console.log('   WhatsApp API: /api/*');
       console.log('   Media Files: /media/*');
       console.log('   Health Check: /health');
-      console.log('   API Docs: /api-docs\n');
+      console.log('   API Docs: /api-docs');
+      
+      if (this.dbConnected) {
+        console.log('\n📊 Database endpoints:');
+        console.log('   Statistics: /api/stats/:groupId');
+        console.log('   Analytics: /api/analytics/:groupId');
+        console.log('   Search: /api/search?q=query');
+        console.log('   Top Authors: /api/authors/top');
+        console.log('   Popular Links: /api/links/popular');
+      }
+      
+      console.log('\n');
     });
     
     // Enhanced error handling
@@ -281,6 +473,13 @@ class WhatsAppMonitorServer {
         console.log('📱 Cleaning up WhatsApp manager...');
         await this.whatsappManager.cleanup();
         console.log('✅ WhatsApp manager cleaned up');
+      }
+      
+      // Close database connection
+      if (this.dbConnected) {
+        console.log('💾 Closing database connection...');
+        await dbConnection.disconnect();
+        console.log('✅ Database connection closed');
       }
       
       // Close Socket.IO

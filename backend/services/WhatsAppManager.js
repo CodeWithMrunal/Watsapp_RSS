@@ -6,6 +6,13 @@ const config = require('../config');
 const FileUtils = require('../utils/fileUtils');
 const MessageUtils = require('../utils/messageUtils');
 
+// Add MongoDB imports
+const dbConnection = require('../database/connection');
+const Message = require('../database/models/Message');
+const Media = require('../database/models/Media');
+const { Group, Author, Link } = require('../database/models/Group');
+const Analytics = require('../database/models/Analytics');
+
 class WhatsAppManager {
   constructor(io, rssManager) {
     this.client = null;
@@ -20,6 +27,9 @@ class WhatsAppManager {
     this.groupsCacheTime = null;
     this.CACHE_DURATION = 5 * 60 * 1000; // 5 minutes cache
     
+    // MongoDB connection status
+    this.dbConnected = false;
+    
     // CRITICAL DEBUG: Let's see what's happening with paths
     console.log('🔍 DEBUG: Current working directory:', process.cwd());
     console.log('🔍 DEBUG: __dirname:', __dirname);
@@ -27,10 +37,6 @@ class WhatsAppManager {
     // Session persistence settings - Try different path approaches
     this.sessionPath = path.resolve('./.wwebjs_auth');  // Relative to working directory
     this.sessionDataPath = path.resolve('./session-data.json');
-    
-    // Alternative absolute paths (comment out one set or the other to test)
-    // this.sessionPath = path.join(process.cwd(), '.wwebjs_auth');
-    // this.sessionDataPath = path.join(process.cwd(), 'session-data.json');
     
     console.log('📂 DEBUG: Session paths:', {
       sessionPath: this.sessionPath,
@@ -41,9 +47,26 @@ class WhatsAppManager {
     
     // Initialize session data
     this.loadSessionData();
+    
+    // Initialize database connection
+    this.initializeDatabase();
   }
 
-  // Load saved session data
+  // NEW: Initialize database connection
+  async initializeDatabase() {
+    try {
+      if (!this.dbConnected) {
+        await dbConnection.connect();
+        this.dbConnected = true;
+        console.log('✅ MongoDB connected for WhatsApp Manager');
+      }
+    } catch (error) {
+      console.error('❌ Failed to connect to MongoDB:', error);
+      // Continue without database - fallback to JSON
+    }
+  }
+
+  // Load saved session data (keep existing implementation)
   loadSessionData() {
     try {
       if (fs.existsSync(this.sessionDataPath)) {
@@ -74,8 +97,8 @@ class WhatsAppManager {
     }
   }
 
-  // Save session data
-  saveSessionData() {
+  // Enhanced save session data with MongoDB sync
+  async saveSessionData() {
     try {
       const sessionData = {
         selectedGroup: this.selectedGroup,
@@ -88,12 +111,66 @@ class WhatsAppManager {
       
       fs.writeFileSync(this.sessionDataPath, JSON.stringify(sessionData, null, 2));
       console.log('💾 Session data saved to:', this.sessionDataPath);
+      
+      // Also save to MongoDB if connected
+      if (this.dbConnected && this.selectedGroup) {
+        await this.syncMessagesToDatabase();
+      }
     } catch (error) {
       console.warn('⚠️ Could not save session data:', error.message);
     }
   }
 
-  // ENHANCED DEBUG: Initialize method with extensive logging
+  // NEW: Sync messages to MongoDB
+  async syncMessagesToDatabase() {
+    if (!this.dbConnected || this.messageHistory.length === 0) return;
+    
+    try {
+      const operations = this.messageHistory.map(msg => ({
+        updateOne: {
+          filter: { id: msg.id },
+          update: { $set: msg },
+          upsert: true
+        }
+      }));
+      
+      if (operations.length > 0) {
+        await Message.bulkWrite(operations);
+        console.log(`📊 Synced ${operations.length} messages to MongoDB`);
+      }
+    } catch (error) {
+      console.error('❌ Error syncing messages to database:', error);
+    }
+  }
+
+  // NEW: Create message groups in MongoDB
+async createMessageGroups() {
+  if (!this.dbConnected || this.messageHistory.length === 0) return;
+  
+  try {
+    // Group messages using MessageUtils
+    const groupedMessages = MessageUtils.groupMessages(this.messageHistory);
+    
+    for (const group of groupedMessages) {
+      // Create group metadata
+      const groupData = MessageUtils.createGroupMetadata(group);
+      
+      // Save to MongoDB
+      await Group.findOneAndUpdate(
+        { id: groupData.id },
+        { $set: groupData },
+        { upsert: true }
+      );
+    }
+    
+    console.log(`📊 Created ${groupedMessages.length} message groups in MongoDB`);
+  } catch (error) {
+    console.error('❌ Error creating message groups:', error);
+  }
+}
+  // Keep all existing initialization and setup methods...
+  // (initialize, setupEventHandlers, etc. remain the same)
+
   initialize() {
     console.log('🔄 Initializing WhatsApp client...');
     console.log('📂 Checking for existing WhatsApp session...');
@@ -308,7 +385,7 @@ class WhatsAppManager {
       }
       
       // Save session data immediately when ready
-      this.saveSessionData();
+      await this.saveSessionData();
       
       // Pre-fetch groups in background
       this.prefetchGroups();
@@ -321,11 +398,21 @@ class WhatsAppManager {
           if (chat) {
             console.log(`✅ Successfully restored group: ${this.selectedGroup.name}`);
             this.io.emit('group_restored', this.selectedGroup);
+            
+            // Load messages from database if available
+            if (this.dbConnected) {
+              await this.loadMessagesFromDatabase();
+            }
           }
         } catch (error) {
           console.warn(`⚠️ Could not restore previous group: ${error.message}`);
           this.selectedGroup = null;
         }
+      }
+      
+      // Generate daily analytics if database is connected
+      if (this.dbConnected) {
+        this.scheduleAnalytics();
       }
       
       this.io.emit('ready');
@@ -394,13 +481,67 @@ class WhatsAppManager {
     });
   }
 
-  // Rest of your methods remain the same...
+  // NEW: Load messages from database
+  async loadMessagesFromDatabase() {
+    if (!this.dbConnected || !this.selectedGroup) return;
+    
+    try {
+      const messages = await Message.findByGroup(this.selectedGroup.id, {
+        limit: 100,
+        sort: -1
+      });
+      
+      if (messages.length > 0) {
+        this.messageHistory = messages.map(msg => msg.toObject());
+        console.log(`📊 Loaded ${messages.length} messages from MongoDB`);
+      }
+    } catch (error) {
+      console.error('❌ Error loading messages from database:', error);
+    }
+  }
+
+  // NEW: Schedule analytics generation
+  scheduleAnalytics() {
+    // Generate analytics daily at midnight
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+    
+    const timeUntilMidnight = tomorrow.getTime() - now.getTime();
+    
+    setTimeout(() => {
+      this.generateDailyAnalytics();
+      // Schedule for every 24 hours
+      setInterval(() => this.generateDailyAnalytics(), 24 * 60 * 60 * 1000);
+    }, timeUntilMidnight);
+    
+    console.log(`📊 Analytics scheduled to run at midnight (in ${Math.round(timeUntilMidnight / 1000 / 60)} minutes)`);
+  }
+
+  // NEW: Generate daily analytics
+  async generateDailyAnalytics() {
+    if (!this.dbConnected || !this.selectedGroup) return;
+    
+    try {
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      
+      await Analytics.generateDailyAnalytics(this.selectedGroup.id, yesterday);
+      console.log(`📊 Generated daily analytics for ${yesterday.toDateString()}`);
+    } catch (error) {
+      console.error('❌ Error generating analytics:', error);
+    }
+  }
+
+  // Rest of your methods remain mostly the same, but with MongoDB integration...
+  
   async prefetchGroups() {
     try {
       console.log('🔄 Pre-fetching groups in background...');
       const groups = await this.fetchGroupsOptimized();
       console.log(`✅ Pre-fetched ${groups.length} groups`);
-      this.saveSessionData();
+      await this.saveSessionData();
     } catch (error) {
       console.error('Error pre-fetching groups:', error);
     }
@@ -462,6 +603,7 @@ class WhatsAppManager {
     return this.isReady && this.isAuthenticated && this.client;
   }
 
+  // Enhanced handleIncomingMessage with MongoDB save
   async handleIncomingMessage(message) {
     console.log('Received message:', message.body || `[${message.type}]`);
     
@@ -470,10 +612,15 @@ class WhatsAppManager {
     if (this.selectedUser && message.author !== this.selectedUser) return;
     
     let mediaPath = null;
+    let mediaMetadata = null;
 
     if (message.hasMedia) {
       console.log(`📦 Message has media. Type: ${message.type}, From: ${message.author}`);
-      mediaPath = await this.downloadMedia(message);
+      const mediaResult = await this.downloadMedia(message);
+      if (mediaResult) {
+        mediaPath = mediaResult.path;
+        mediaMetadata = mediaResult.metadata;
+      }
     }
 
     const messageData = MessageUtils.createMessageData(message, mediaPath);
@@ -483,16 +630,98 @@ class WhatsAppManager {
       this.messageHistory = this.messageHistory.slice(-1000);
     }
     
-    const grouped = MessageUtils.groupMessages([messageData]);
-    if (grouped.length > 0) {
-      this.rssManager.updateFeed(grouped[0], this.messageHistory);
-      this.io.emit('new_message', grouped[0]);
+    // Save to MongoDB if connected
+    if (this.dbConnected) {
+  try {
+    // Save message
+    const savedMessage = await Message.create(messageData);
+    
+    // Save media metadata if exists
+    if (mediaMetadata) {
+      try {
+        // Check if media already exists by fileHash
+        let savedMedia = await Media.findOne({ fileHash: mediaMetadata.fileHash });
+        
+        if (!savedMedia) {
+          savedMedia = await Media.create(mediaMetadata);
+        } else {
+          console.log(`📦 Media already exists with hash: ${mediaMetadata.fileHash}`);
+        }
+        
+        await Message.findByIdAndUpdate(savedMessage._id, {
+          mediaId: savedMedia._id
+        });
+      } catch (mediaError) {
+        if (mediaError.code === 11000) {
+          // Handle duplicate media
+          const existingMedia = await Media.findOne({ fileHash: mediaMetadata.fileHash });
+          if (existingMedia) {
+            await Message.findByIdAndUpdate(savedMessage._id, {
+              mediaId: existingMedia._id
+            });
+          }
+        } else {
+          throw mediaError;
+        }
+      }
+    }
+        
+        // Update author statistics
+        await Author.findOrCreateByPhone(message.author);
+        
+        // Extract and save links
+        if (messageData.links && messageData.links.length > 0) {
+          for (const link of messageData.links) {
+            await Link.create({
+              ...link,
+              messageId: savedMessage.id,
+              groupId: savedMessage.groupId,
+              author: savedMessage.author,
+              messageTimestamp: savedMessage.timestamp
+            });
+          }
+        }
+        
+        console.log('✅ Message saved to MongoDB');
+      } catch (error) {
+        console.error('❌ Error saving to MongoDB:', error);
+      }
     }
     
+    if (this.dbConnected) {
+  const grouped = MessageUtils.groupMessages([messageData]);
+  if (grouped.length > 0) {
+    const groupData = MessageUtils.createGroupMetadata(grouped[0]);
+    await Group.findOneAndUpdate(
+      { id: groupData.id },
+      { $set: groupData },
+      { upsert: true }
+    );
+  }
+}
+
+// Update RSS feed
+const grouped = MessageUtils.groupMessages([messageData]);
+if (grouped.length > 0) {
+  // If database is connected, use DB RSS manager
+  if (this.dbConnected && this.rssManager.generateFeed) {
+    await this.rssManager.generateFeed({
+      groupId: this.selectedGroup.id,
+      limit: 50
+    });
+  } else {
+    // Fallback to original RSS manager
+    this.rssManager.updateFeed(grouped[0], this.messageHistory);
+  }
+  
+  this.io.emit('new_message', grouped[0]);
+}
+    
     FileUtils.updateMediaIndex(this.messageHistory);
-    this.saveSessionData();
+    await this.saveSessionData();
   }
 
+  // Enhanced downloadMedia to return metadata
   async downloadMedia(message) {
     try {
       console.log(`🎬 Starting media download for message ${message.id.id}`);
@@ -530,7 +759,18 @@ class WhatsAppManager {
         return null;
       }
 
-      return FileUtils.saveMedia(media, message.id.id);
+      // Save media with enhanced metadata
+      const messageMetadata = {
+        author: message.author,
+        groupId: this.selectedGroup.id,
+        caption: message.body || '',
+        timestamp: message.timestamp,
+        isViewOnce: message.isViewOnce || false,
+        isForwarded: message.isForwarded || false,
+        forwardingScore: message.forwardingScore || 0
+      };
+      
+      return FileUtils.saveMedia(media, message.id.id, messageMetadata);
       
     } catch (err) {
       console.error('❌ Error downloading media:', err.message);
@@ -552,7 +792,13 @@ class WhatsAppManager {
     
     this.messageHistory = [];
     this.rssManager.reset();
-    this.saveSessionData();
+    
+    // Load messages from database if connected
+    if (this.dbConnected) {
+      await this.loadMessagesFromDatabase();
+    }
+    
+    await this.saveSessionData();
     
     console.log(`✅ Selected group: ${this.selectedGroup.name}`);
     
@@ -589,16 +835,65 @@ class WhatsAppManager {
       messages.map(async (msg) => {
         const existing = this.messageHistory.find(m => m.id === msg.id._serialized);
         let mediaPath = existing?.mediaPath || null;
+        let mediaMetadata = null;
 
         if (existing) {
           console.log(`🔁 Message ${msg.id._serialized} already exists`);
         }
 
         if (msg.hasMedia && !mediaPath) {
-          mediaPath = await this.downloadMedia(msg);
+          const mediaResult = await this.downloadMedia(msg);
+          if (mediaResult) {
+            mediaPath = mediaResult.path;
+            mediaMetadata = mediaResult.metadata;
+          }
         }
 
-        return MessageUtils.createMessageData(msg, mediaPath);
+        const messageData = MessageUtils.createMessageData(msg, mediaPath);
+        
+        // Save to MongoDB if connected and not existing
+        // In the fetchHistory method, replace the media saving section with:
+if (this.dbConnected && !existing) {
+  try {
+    const savedMessage = await Message.create(messageData);
+    
+    if (mediaMetadata) {
+      try {
+        // Check if media already exists by fileHash
+        let savedMedia = await Media.findOne({ fileHash: mediaMetadata.fileHash });
+        
+        if (!savedMedia) {
+          // Create new media entry only if it doesn't exist
+          savedMedia = await Media.create(mediaMetadata);
+        } else {
+          console.log(`📦 Media already exists with hash: ${mediaMetadata.fileHash}`);
+        }
+        
+        // Update message with media reference
+        await Message.findByIdAndUpdate(savedMessage._id, {
+          mediaId: savedMedia._id
+        });
+      } catch (mediaError) {
+        if (mediaError.code === 11000) {
+          // Duplicate key error - media already exists
+          console.log('📦 Media already exists, linking to existing entry');
+          const existingMedia = await Media.findOne({ fileHash: mediaMetadata.fileHash });
+          if (existingMedia) {
+            await Message.findByIdAndUpdate(savedMessage._id, {
+              mediaId: existingMedia._id
+            });
+          }
+        } else {
+          throw mediaError;
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error saving historical message:', error);
+  }
+}
+        
+        return messageData;
       })
     );
 
@@ -614,11 +909,27 @@ class WhatsAppManager {
     
     FileUtils.updateMediaIndex(this.messageHistory);
     
-    const filteredMessages = MessageUtils.filterMessagesByUser(processedMessages, this.selectedUser);
-    const grouped = MessageUtils.groupMessages(filteredMessages.reverse());
-    grouped.forEach(group => this.rssManager.updateFeed(group, this.messageHistory));
+    // Create groups in MongoDB
+if (this.dbConnected) {
+  await this.createMessageGroups();
+}
+
+const filteredMessages = MessageUtils.filterMessagesByUser(processedMessages, this.selectedUser);
+const grouped = MessageUtils.groupMessages(filteredMessages.reverse());
+
+// Update RSS feed
+if (this.dbConnected && this.rssManager.generateFeed) {
+  // Generate RSS from database
+  await this.rssManager.generateFeed({
+    groupId: this.selectedGroup.id,
+    limit: 50
+  });
+} else {
+  // Fallback to file-based RSS
+  grouped.forEach(group => this.rssManager.updateFeed(group, this.messageHistory));
+}
     
-    this.saveSessionData();
+    await this.saveSessionData();
     
     return grouped;
   }
@@ -722,13 +1033,24 @@ class WhatsAppManager {
       sessionFolders,
       sessionPath: this.sessionPath,
       messageHistoryCount: this.messageHistory.length,
-      workingDirectory: process.cwd()
+      workingDirectory: process.cwd(),
+      databaseConnected: this.dbConnected // NEW: Add database status
     };
   }
 
   async cleanup() {
     console.log('🧹 Cleaning up WhatsApp manager...');
-    this.saveSessionData();
+    await this.saveSessionData();
+    
+    // Close database connection if needed
+    if (this.dbConnected) {
+      try {
+        await dbConnection.disconnect();
+        console.log('✅ Database connection closed');
+      } catch (error) {
+        console.warn('⚠️ Error closing database connection:', error);
+      }
+    }
     
     if (this.client) {
       try {
