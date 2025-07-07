@@ -748,9 +748,8 @@ if (this.dbConnected) {
       console.error(`❌ Error saving link ${link.url}:`, linkError);
     }
   }
-} else {
-  console.log('🔗 No links found in message');
-}
+} 
+await Author.findOrCreateByPhone(savedMessage.author);
     
     console.log('✅ Message saved to MongoDB');
   } catch (error) {

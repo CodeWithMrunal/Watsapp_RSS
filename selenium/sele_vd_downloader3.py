@@ -14,33 +14,42 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import shutil
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure
+from bson import ObjectId
 
-class LinkDownloadManager:
-    def __init__(self, messages_file="backend/rss/messages.json", media_file="backend/media/links.json", download_dir="backend/media"):
-        if os.getenv('DOCKER_ENV'):
-            # Inside Docker — use absolute paths (volume-mounted)
-            self.messages_file = Path('/app/rss/messages.json').resolve()
-            self.media_file = Path('/app/media/links.json').resolve()
-            self.download_dir = Path('/app/media')
-        else:
-            # Local dev — resolve paths relative to this script's location (selenium/)
-            base_dir = Path(__file__).resolve().parent.parent  # Go from selenium/ → project root
-            self.messages_file = (base_dir / messages_file).resolve()
-            self.media_file = (base_dir / media_file).resolve()
-            self.download_dir = (base_dir / download_dir).resolve()
+class MongoDBLinkDownloadManager:
+    def __init__(self, 
+                 mongo_uri="mongodb://localhost:27017/",
+                 db_name="whatsapp-monitor",
+                 collection_name="links",
+                 media_file="backend/media/links.json", 
+                 download_dir="backend/media"):
+        
+        # MongoDB setup
+        self.mongo_uri = mongo_uri
+        self.db_name = db_name
+        self.collection_name = collection_name
+        self.client = None
+        self.db = None
+        self.links_collection = None
+        
+        # Connect to MongoDB
+        self._connect_to_mongodb()
+        
+        # Local dev — resolve paths relative to this script's location
+        base_dir = Path(__file__).resolve().parent.parent  # Go from selenium/ → project root
+        self.media_file = (base_dir / media_file).resolve()
+        self.download_dir = (base_dir / download_dir).resolve()
 
         # Make sure download directory exists
         self.download_dir.mkdir(parents=True, exist_ok=True)
         
-        # Track processed links to avoid duplicates - FIXED: Use both URL and hash
+        # Track processed links to avoid duplicates
         self.processed_links = set()  # Store URL hashes
         self.processed_urls = set()   # Store actual URLs for debugging
         self.link_to_media_map = {}
-        self.last_messages_content = ""
-        self.last_file_size = 0
-        self.last_modification_time = 0
+        self.last_check_time = datetime.now()
         
         # Thread safety
         self.processing_lock = threading.Lock()
@@ -49,161 +58,101 @@ class LinkDownloadManager:
         # Initialize downloader (will be created per download to avoid conflicts)
         self.downloader = None
         
-        # Load existing processed links
+        # Load existing processed links from both MongoDB and local file
         self.load_processed_links()
         
         print(f"📁 Download directory: {self.download_dir.absolute()}")
-        print(f"📄 Messages file: {self.messages_file.absolute()}")
         print(f"📄 Media file: {self.media_file.absolute()}")
+        print(f"🗄️ MongoDB: {self.db_name}.{self.collection_name}")
         
-        # Store initial file state - FIXED: Only if file exists
-        if self.messages_file.exists():
-            self.update_file_state()
-        else:
-            print("ℹ️ Messages file doesn't exist yet, will monitor for creation")
-
-    def update_file_state(self):
-        """Update the current state of the messages file"""
+    def _connect_to_mongodb(self):
+        """Connect to MongoDB database"""
         try:
-            if self.messages_file.exists():
-                stat = self.messages_file.stat()
-                self.last_modification_time = stat.st_mtime
-                self.last_file_size = stat.st_size
-                
-                with open(self.messages_file, 'r', encoding='utf-8') as f:
-                    self.last_messages_content = f.read()
-                    
-                print(f"📊 File state updated - Size: {self.last_file_size}, Modified: {datetime.fromtimestamp(self.last_modification_time)}")
-            else:
-                # FIXED: Reset state when file doesn't exist
-                self.last_modification_time = 0
-                self.last_file_size = 0
-                self.last_messages_content = ""
-                print("📊 File state reset - messages.json doesn't exist")
+            self.client = MongoClient(self.mongo_uri)
+            # Test connection
+            self.client.admin.command('ismaster')
+            self.db = self.client[self.db_name]
+            self.links_collection = self.db[self.collection_name]
+            print(f"✅ Connected to MongoDB: {self.db_name}")
+        except ConnectionFailure as e:
+            print(f"❌ Failed to connect to MongoDB: {e}")
+            raise
         except Exception as e:
-            print(f"⚠️ Error updating file state: {e}")
-    
-    def has_file_changed(self):
-        """Check if the messages file has actually changed"""
-        try:
-            if not self.messages_file.exists():
-                # FIXED: If file was deleted, consider it a change
-                if self.last_messages_content != "":
-                    print("📄 Messages file was deleted - considering as change")
-                    return True
-                return False
-                
-            stat = self.messages_file.stat()
-            current_mtime = stat.st_mtime
-            current_size = stat.st_size
-            
-            # Check modification time and size first (quick check)
-            if current_mtime <= self.last_modification_time and current_size == self.last_file_size:
-                return False
-            
-            # If time/size changed, check content
-            with open(self.messages_file, 'r', encoding='utf-8') as f:
-                current_content = f.read()
-            
-            if current_content == self.last_messages_content:
-                # File was touched but content didn't change
-                self.last_modification_time = current_mtime
-                self.last_file_size = current_size
-                return False
-            
-            print(f"📄 File content changed - New size: {current_size}, Old size: {self.last_file_size}")
-            return True
-            
-        except Exception as e:
-            print(f"⚠️ Error checking file changes: {e}")
-            return False
+            print(f"❌ MongoDB connection error: {e}")
+            raise
     
     def load_processed_links(self):
-        """Load already processed links from links.json to avoid re-downloading"""
+        """Load already processed links from both MongoDB and links.json"""
         try:
+            # Load from MongoDB - links marked as processed
+            processed_count = 0
+            if self.links_collection is not None:
+                processed_links = self.links_collection.find({'processed': True})
+                for link in processed_links:
+                    url = link.get('url', '')
+                    if url:
+                        link_hash = hashlib.md5(url.encode()).hexdigest()
+                        self.processed_links.add(link_hash)
+                        self.processed_urls.add(url)
+                        processed_count += 1
+                print(f"📚 Loaded {processed_count} processed links from MongoDB")
+            
+            # Also load from local links.json for backward compatibility
             if self.media_file.exists():
                 with open(self.media_file, 'r', encoding='utf-8') as f:
                     media_data = json.load(f)
                 
+                local_count = 0
                 for entry in media_data:
                     if 'source_link' in entry:
-                        # FIXED: Store both hash and actual URL
                         url = entry['source_link']
                         link_hash = hashlib.md5(url.encode()).hexdigest()
                         self.processed_links.add(link_hash)
                         self.processed_urls.add(url)
                         self.link_to_media_map[link_hash] = entry
+                        local_count += 1
                 
-                print(f"📚 Loaded {len(self.processed_links)} previously processed links")
-                if self.processed_urls:
-                    print(f"🔗 Sample processed URLs: {list(self.processed_urls)[:3]}")
-            else:
-                print("📚 No existing media file found - starting fresh")
+                print(f"📚 Loaded {local_count} processed links from local links.json")
+            
+            print(f"📊 Total unique processed links: {len(self.processed_links)}")
+            
         except Exception as e:
             print(f"⚠️ Error loading processed links: {e}")
     
-    def extract_links_from_messages(self):
-        """Extract Google Drive and WeTransfer links from messages.json"""
+    def get_unprocessed_links(self):
+        """Get all unprocessed links from MongoDB that match our criteria"""
         try:
-            if not self.messages_file.exists():
-                print(f"❌ Messages file not found: {self.messages_file}")
-                return []
+            # Query for Google Drive and WeTransfer links that haven't been processed
+            query = {
+                '$or': [
+                    {'domain': 'drive.google.com'},
+                    {'domain': 'we.tl'},
+                    {'url': {'$regex': 'wetransfer.com'}},
+                ],
+                '$or': [
+                    {'processed': {'$exists': False}},
+                    {'processed': False}
+                ]
+            }
             
-            with open(self.messages_file, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-                if not content:
-                    print("ℹ️ Messages file is empty")
-                    return []
-                
-                messages = json.loads(content)
+            # Sort by messageTimestamp to process oldest first
+            links = list(self.links_collection.find(query).sort('messageTimestamp', 1))
             
-            if not messages:
-                print("ℹ️ No messages found in file")
-                return []
+            # Filter out already processed links (double-check)
+            unprocessed_links = []
+            for link in links:
+                url = link.get('url', '')
+                if url and not self.is_link_processed(url):
+                    unprocessed_links.append(link)
             
-            links = []
-            link_patterns = [
-                r'https://drive\.google\.com/file/d/[^/\s]+[^\s]*',
-                r'https://drive\.google\.com/open\?id=[^\s]+',
-                r'https://we\.tl/t-[^\s]+',
-                r'https://wetransfer\.com/downloads/[^\s]+'
-            ]
+            return unprocessed_links
             
-            for message in messages:
-                if message.get('type') == 'chat' and message.get('body'):
-                    body = message['body']
-                    
-                    for pattern in link_patterns:
-                        matches = re.findall(pattern, body)
-                        for match in matches:
-                            # Clean up the URL (remove any trailing characters)
-                            clean_url = match.rstrip('.,;!?)')
-                            
-                            link_info = {
-                                'url': clean_url,
-                                'message_id': message['id'],
-                                'author': message['author'],
-                                'timestamp': message['timestamp'],
-                                'message_body': body
-                            }
-                            links.append(link_info)
-            
-            print(f"🔍 Found {len(links)} total links in messages")
-            # FIXED: Debug logging
-            if links:
-                print(f"🔗 Sample links found: {[link['url'] for link in links[:3]]}")
-            return links
-            
-        except json.JSONDecodeError as e:
-            print(f"❌ Error parsing JSON in messages file: {e}")
-            return []
         except Exception as e:
-            print(f"❌ Error extracting links: {e}")
+            print(f"❌ Error fetching unprocessed links: {e}")
             return []
     
     def is_link_processed(self, url):
         """Check if a link has already been processed"""
-        # FIXED: Normalize URL before checking
         normalized_url = url.strip().rstrip('/')
         link_hash = hashlib.md5(normalized_url.encode()).hexdigest()
         
@@ -216,22 +165,39 @@ class LinkDownloadManager:
             
         return is_processed
     
-    def mark_link_processed(self, url, media_info=None):
-        """Mark a link as processed"""
-        # FIXED: Normalize URL before storing
+    def mark_link_processed(self, url, link_doc_id=None, media_info=None):
+        """Mark a link as processed in both MongoDB and local tracking"""
         normalized_url = url.strip().rstrip('/')
         link_hash = hashlib.md5(normalized_url.encode()).hexdigest()
         
+        # Update local tracking
         self.processed_links.add(link_hash)
         self.processed_urls.add(normalized_url)
         
         if media_info:
             self.link_to_media_map[link_hash] = media_info
-            
-        print(f"✅ Marked as processed: {url[:50]}...")
+        
+        # Update MongoDB
+        if link_doc_id and self.links_collection is not None:
+            try:
+                self.links_collection.update_one(
+                    {'_id': link_doc_id},
+                    {
+                        '$set': {
+                            'processed': True,
+                            'processedAt': datetime.now(),
+                            'downloadInfo': media_info if media_info else {}
+                        }
+                    }
+                )
+                print(f"✅ Marked as processed in MongoDB: {url[:50]}...")
+            except Exception as e:
+                print(f"⚠️ Error updating MongoDB: {e}")
+        
+        print(f"✅ Marked as processed locally: {url[:50]}...")
     
     def update_media_json(self, link_info, downloaded_files):
-        """Update links.json with new download information"""
+        """Update links.json with new download information (for backward compatibility)"""
         try:
             # Load existing media data
             media_data = []
@@ -265,24 +231,30 @@ class LinkDownloadManager:
                     
                     media_entry = {
                         "id": media_id,
-                        "author": link_info['author'],
+                        "author": link_info.get('author', 'unknown'),
                         "timestamp": int(time.time()),
-                        "original_timestamp": link_info['timestamp'],
+                        "original_timestamp": link_info.get('messageTimestamp', int(time.time())),
                         "caption": f"Auto-downloaded from: {link_info['url'][:50]}...",
                         "type": media_type,
                         "mediaPath": f"media/{file_path.name}",
                         "source_link": link_info['url'],
-                        "source_message_id": link_info['message_id'],
-                        "source_message_body": link_info['message_body'],
+                        "source_message_id": link_info.get('messageId', ''),
+                        "source_group_id": link_info.get('groupId', ''),
                         "file_size": file_size,
                         "file_extension": file_extension,
-                        "download_date": datetime.now().isoformat()
+                        "download_date": datetime.now().isoformat(),
+                        "platform": link_info.get('platform', 'unknown'),
+                        "mongo_id": str(link_info.get('_id', ''))
                     }
                     
                     media_data.append(media_entry)
                     
-                    # FIXED: Mark this link as processed IMMEDIATELY
-                    self.mark_link_processed(link_info['url'], media_entry)
+                    # Mark this link as processed with media info
+                    self.mark_link_processed(
+                        link_info['url'], 
+                        link_info.get('_id'),
+                        media_entry
+                    )
             
             # Save updated links.json
             with open(self.media_file, 'w', encoding='utf-8') as f:
@@ -293,21 +265,26 @@ class LinkDownloadManager:
         except Exception as e:
             print(f"❌ Error updating links.json: {e}")
     
-    def download_link(self, link_info):
+    def download_link(self, link_doc):
         """Download a single link using the Selenium downloader"""
-        url = link_info['url']
+        url = link_doc.get('url', '')
         
-        # FIXED: Double-check if link is processed (with debug info)
+        if not url:
+            print("⚠️ No URL found in link document")
+            return False
+        
+        # Double-check if link is processed
         if self.is_link_processed(url):
             print(f"⏭️ Skipping already processed link: {url[:50]}...")
             return False
         
         print(f"⬇️ Downloading: {url}")
-        print(f"👤 Author: {link_info['author']}")
-        print(f"📅 Message time: {datetime.fromtimestamp(link_info['timestamp'])}")
+        print(f"👤 Author: {link_doc.get('authorNumber', 'unknown')}")
+        print(f"📅 Message time: {datetime.fromtimestamp(link_doc.get('messageTimestamp', 0))}")
+        print(f"🔗 Platform: {link_doc.get('platform', 'unknown')}")
         
-        # FIXED: Mark as processing to prevent race conditions
-        self.mark_link_processed(url)  # Mark early to prevent duplicate processing
+        # Mark as processing early to prevent race conditions
+        self.mark_link_processed(url, link_doc.get('_id'))
         
         # Create a new downloader instance for this download
         downloader = SeleniumVideoDownloader(download_dir=str(self.download_dir), headless=True)
@@ -328,28 +305,52 @@ class LinkDownloadManager:
                     downloaded_files = [self.download_dir / filename for filename in new_files]
                     print(f"✅ Downloaded {len(new_files)} file(s): {list(new_files)}")
                     
-                    # Update links.json
-                    self.update_media_json(link_info, downloaded_files)
+                    # Update links.json for backward compatibility
+                    self.update_media_json(link_doc, downloaded_files)
+                    
+                    # Update MongoDB with download success
+                    if self.links_collection is not None:
+                        self.links_collection.update_one(
+                            {'_id': link_doc.get('_id')},
+                            {
+                                '$set': {
+                                    'downloadSuccess': True,
+                                    'downloadedFiles': list(new_files),
+                                    'downloadCompletedAt': datetime.now()
+                                }
+                            }
+                        )
+                    
                     return True
                 else:
                     print("⚠️ Download reported success but no new files found")
-                    # Link already marked as processed above
                     return False
             else:
                 print(f"❌ Failed to download: {url}")
-                # Link already marked as processed above to prevent infinite retries
+                
+                # Update MongoDB with download failure
+                if self.links_collection is not None:
+                    self.links_collection.update_one(
+                        {'_id': link_doc.get('_id')},
+                        {
+                            '$set': {
+                                'downloadSuccess': False,
+                                'downloadAttemptedAt': datetime.now()
+                            }
+                        }
+                    )
+                
                 return False
                 
         except Exception as e:
             print(f"❌ Error downloading {url}: {e}")
-            # Link already marked as processed above
             return False
         finally:
             # Always clean up the downloader
             downloader.cleanup()
     
     def process_new_links(self, force=False):
-        """Process all new links found in messages.json"""
+        """Process all new links found in MongoDB"""
         with self.processing_lock:
             if self.is_processing and not force:
                 print("⏳ Already processing links, skipping...")
@@ -358,64 +359,63 @@ class LinkDownloadManager:
             self.is_processing = True
             
         try:
-            print(f"🔄 Processing links... (Force: {force})")
+            print(f"🔄 Processing links from MongoDB... (Force: {force})")
             
-            # Check if file has actually changed (unless forced)
-            if not force and not self.has_file_changed():
-                print("ℹ️ No changes detected in messages.json")
+            # Get unprocessed links
+            unprocessed_links = self.get_unprocessed_links()
+            
+            if not unprocessed_links:
+                print("ℹ️ No unprocessed links found")
                 return
             
-            links = self.extract_links_from_messages()
+            print(f"🆕 Found {len(unprocessed_links)} unprocessed links")
             
-            if not links:
-                print("ℹ️ No links found in messages")
-                self.update_file_state()
-                return
-            
-            # FIXED: Better filtering with debug info
-            new_links = []
-            for link in links:
-                if not self.is_link_processed(link['url']):
-                    new_links.append(link)
-            
-            if not new_links:
-                print("ℹ️ No new links to process")
-                print(f"📊 Total links found: {len(links)}, Already processed: {len(links) - len(new_links)}")
-                self.update_file_state()
-                return
-            
-            print(f"🆕 Found {len(new_links)} new links to download out of {len(links)} total")
-            
-            for i, link_info in enumerate(new_links, 1):
-                print(f"\n📥 Processing link {i}/{len(new_links)}")
+            for i, link_doc in enumerate(unprocessed_links, 1):
+                print(f"\n📥 Processing link {i}/{len(unprocessed_links)}")
                 print("-" * 50)
                 
                 try:
-                    self.download_link(link_info)
+                    self.download_link(link_doc)
                     # Small delay between downloads
                     time.sleep(2)
                 except Exception as e:
-                    print(f"❌ Error processing link {link_info['url']}: {e}")
+                    print(f"❌ Error processing link {link_doc.get('url', 'unknown')}: {e}")
                     # Mark as processed even on error to prevent infinite retries
-                    self.mark_link_processed(link_info['url'])
+                    self.mark_link_processed(link_doc.get('url', ''), link_doc.get('_id'))
                     continue
             
-            print(f"\n✅ Finished processing {len(new_links)} links")
-            
-            # Update file state after successful processing
-            self.update_file_state()
+            print(f"\n✅ Finished processing {len(unprocessed_links)} links")
+            self.last_check_time = datetime.now()
             
         finally:
             self.is_processing = False
+    
+    def monitor_continuous(self, check_interval=10):
+        """Continuously monitor MongoDB for new links"""
+        print(f"🔄 Starting continuous monitoring (checking every {check_interval} seconds)")
+        
+        while True:
+            try:
+                self.process_new_links()
+                time.sleep(check_interval)
+            except KeyboardInterrupt:
+                print("\n🛑 Monitoring stopped by user")
+                break
+            except Exception as e:
+                print(f"❌ Error in monitoring loop: {e}")
+                time.sleep(check_interval)
     
     def cleanup(self):
         """Clean up resources"""
         if hasattr(self, 'downloader') and self.downloader:
             self.downloader.cleanup()
+        
+        if self.client:
+            self.client.close()
+            print("🧹 MongoDB connection closed")
 
 
-# ... (Keep all the rest of the SeleniumVideoDownloader, MessagesFileHandler, PollingMonitor, and main function classes unchanged)
-
+# Include the SeleniumVideoDownloader class from the original code
 class SeleniumVideoDownloader:
     def __init__(self, download_dir="backend/media", headless=True):
         self.download_dir = Path(download_dir).resolve()
@@ -960,169 +960,74 @@ class SeleniumVideoDownloader:
                 pass
 
 
-class MessagesFileHandler(FileSystemEventHandler):
-    """Handle file system events for messages.json"""
-    def __init__(self, download_manager):
-        self.download_manager = download_manager
-        self.last_event_time = 0
-        
-    def on_modified(self, event):
-        if event.is_directory:
-            return
-            
-        # Check if it's the messages.json file
-        event_path = Path(event.src_path).resolve()
-        if event_path != self.download_manager.messages_file:
-            return
-            
-        # Debounce events (avoid multiple triggers)
-        current_time = time.time()
-        if current_time - self.last_event_time < 3:  # 3 second cooldown
-            return
-            
-        self.last_event_time = current_time
-        
-        print(f"\n📄 messages.json modified at {datetime.now().strftime('%H:%M:%S')}")
-        
-        # Add delay to ensure file is fully written
-        time.sleep(2)
-        
-        try:
-            self.download_manager.process_new_links()
-        except Exception as e:
-            print(f"❌ Error processing new links: {e}")
-
-
-class PollingMonitor:
-    """Alternative polling-based monitor for systems where file watching doesn't work well"""
-    def __init__(self, download_manager, poll_interval=5):
-        self.download_manager = download_manager
-        self.poll_interval = poll_interval
-        self.running = False
-        self.thread = None
-    
-    def start(self):
-        """Start polling"""
-        self.running = True
-        self.thread = threading.Thread(target=self._poll_loop, daemon=True)
-        self.thread.start()
-        print(f"🔄 Started polling every {self.poll_interval} seconds")
-    
-    def stop(self):
-        """Stop polling"""
-        self.running = False
-        if self.thread:
-            self.thread.join()
-    
-    def _poll_loop(self):
-        """Main polling loop"""
-        while self.running:
-            try:
-                self.download_manager.process_new_links()
-                time.sleep(self.poll_interval)
-            except Exception as e:
-                print(f"❌ Polling error: {e}")
-                time.sleep(self.poll_interval)
-
-
 def main():
-    """Main function to run the automated link downloader"""
-    print("🤖 Automated Link Downloader - Enhanced Monitoring")
+    """Main function to run the MongoDB-based automated link downloader"""
+    print("🤖 MongoDB-based Automated Link Downloader")
     print("=" * 60)
     print("Features:")
-    print("✅ Smart file change detection")
+    print("✅ Monitors MongoDB links collection")
+    print("✅ Smart duplicate prevention")
     print("✅ Thread-safe processing")
-    print("✅ Fallback polling mode")
-    print("✅ Improved conflict resolution")
-    print("✅ Fixed duplicate download prevention")
+    print("✅ Updates both MongoDB and local links.json")
+    print("✅ Tracks download status in database")
     print("=" * 60)
     
+    # MongoDB configuration
+    mongo_uri = input("\nEnter MongoDB URI (default: mongodb://localhost:27017/): ").strip()
+    if not mongo_uri:
+        mongo_uri = "mongodb://localhost:27017/"
+    
+    db_name = input("Enter database name (default: whatsapp-monitor): ").strip()
+    if not db_name:
+        db_name = "whatsapp-monitor"
+    
+    collection_name = input("Enter collection name (default: links): ").strip()
+    if not collection_name:
+        collection_name = "links"
+    
     # Initialize the download manager
-    download_manager = LinkDownloadManager()
+    try:
+        download_manager = MongoDBLinkDownloadManager(
+            mongo_uri=mongo_uri,
+            db_name=db_name,
+            collection_name=collection_name
+        )
+    except Exception as e:
+        print(f"❌ Failed to initialize download manager: {e}")
+        return
     
-    # FIXED: Add debugging option
-    debug_mode = input("\nEnable debug mode to see processed links? (y/n, default: n): ").strip().lower()
-    if debug_mode in ['y', 'yes', '1', 'true']:
-        print(f"\n🔍 Debug Info:")
-        print(f"📊 Currently tracking {len(download_manager.processed_links)} processed links")
-        if download_manager.processed_urls:
-            print("🔗 Sample processed URLs:")
-            for url in list(download_manager.processed_urls)[:5]:
-                print(f"   - {url}")
+    # Process mode selection
+    print("\nSelect processing mode:")
+    print("1. Process once (check for unprocessed links now)")
+    print("2. Continuous monitoring (check every N seconds)")
     
-    # Process any existing links first
-    print("\n🔍 Processing existing links...")
-    download_manager.process_new_links(force=True)
+    mode = input("\nEnter mode (1 or 2, default: 2): ").strip()
     
-    # Auto-detect environment and choose monitoring method
-    import os
-    
-    if os.getenv('DOCKER_ENV'):
-        # Docker environment - use polling mode automatically
-        print("\n🐳 Docker environment detected - using polling mode")
-        poll_interval = 10  # Check every 10 seconds
-        monitor = PollingMonitor(download_manager, poll_interval)
-        monitor.start()
+    if mode == "1":
+        # One-time processing
+        print("\n🔍 Processing unprocessed links once...")
+        download_manager.process_new_links(force=True)
+        print("\n✅ Processing complete!")
+    else:
+        # Continuous monitoring
+        check_interval = input("\nCheck interval in seconds (default: 10): ").strip()
+        try:
+            check_interval = int(check_interval)
+        except:
+            check_interval = 10
         
-        print(f"🟢 Polling every {poll_interval} seconds in Docker.")
-        print("Container will run continuously...")
+        print(f"\n🟢 Starting continuous monitoring (checking every {check_interval} seconds)")
+        print("Press Ctrl+C to stop...")
         
         try:
-            while True:
-                time.sleep(30)  # Sleep longer in Docker
-                print(f"📊 Status check - {datetime.now().strftime('%H:%M:%S')}")
+            download_manager.monitor_continuous(check_interval)
         except KeyboardInterrupt:
-            print("\n🛑 Stopping polling...")
-            monitor.stop()
-    else:
-        # Local development - ask user for preference
-        use_polling = input("\nUse polling mode instead of file watching? (y/n, default: n): ").strip().lower()
-        
-        if use_polling in ['y', 'yes', '1', 'true']:
-            # Use polling mode
-            print("\n🔄 Starting polling mode...")
-            poll_interval = 10  # Check every 10 seconds
-            monitor = PollingMonitor(download_manager, poll_interval)
-            monitor.start()
-            
-            print(f"🟢 Polling every {poll_interval} seconds. Press Ctrl+C to stop.")
-            
-            try:
-                while True:
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                print("\n🛑 Stopping polling...")
-                monitor.stop()
-        else:
-            # Use file watching mode
-            print("\n👀 Starting file watching mode...")
-            event_handler = MessagesFileHandler(download_manager)
-            observer = Observer()
-            
-            # Watch the directory containing messages.json
-            watch_path = download_manager.messages_file.parent
-            observer.schedule(event_handler, path=str(watch_path), recursive=False)
-            observer.start()
-            
-            print(f"🟢 Watching {watch_path} for changes. Press Ctrl+C to stop.")
-            
-            # Also start a background polling as backup
-            backup_monitor = PollingMonitor(download_manager, 30)  # Check every 30 seconds as backup
-            backup_monitor.start()
-            
-            try:
-                while True:
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                print("\n🛑 Stopping monitoring...")
-                observer.stop()
-                backup_monitor.stop()
-            
-            observer.join()
+            print("\n🛑 Stopping monitoring...")
     
+    # Cleanup
     download_manager.cleanup()
-    print("👋 Service stopped!")
-    
+    print("\n👋 Service stopped!")
+
+
 if __name__ == "__main__":
-    import sys
     main()
