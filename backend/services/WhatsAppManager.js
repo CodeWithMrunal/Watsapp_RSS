@@ -462,81 +462,92 @@ class WhatsAppManager {
     return this.isReady && this.isAuthenticated && this.client;
   }
 
-  async handleIncomingMessage(message) {
-    console.log('Received message:', message.body || `[${message.type}]`);
-    
-    if (!this.selectedGroup || !message.from.includes('@g.us')) return;
-    if (message.from !== this.selectedGroup.id) return;
-    if (this.selectedUser && message.author !== this.selectedUser) return;
-    
-    let mediaPath = null;
+async handleIncomingMessage(message) {
+  console.log('Received message:', message.body || `[${message.type}]`);
+  
+  if (!this.selectedGroup || !message.from.includes('@g.us')) return;
+  if (message.from !== this.selectedGroup.id) return;
+  if (this.selectedUser && message.author !== this.selectedUser) return;
+  
+  let mediaData = null;
 
-    if (message.hasMedia) {
-      console.log(`📦 Message has media. Type: ${message.type}, From: ${message.author}`);
-      mediaPath = await this.downloadMedia(message);
-    }
-
-    const messageData = MessageUtils.createMessageData(message, mediaPath);
-    this.messageHistory.push(messageData);
-    
-    if (this.messageHistory.length > 1000) {
-      this.messageHistory = this.messageHistory.slice(-1000);
-    }
-    
-    const grouped = MessageUtils.groupMessages([messageData]);
-    if (grouped.length > 0) {
-      this.rssManager.updateFeed(grouped[0], this.messageHistory);
-      this.io.emit('new_message', grouped[0]);
-    }
-    
-    FileUtils.updateMediaIndex(this.messageHistory);
-    this.saveSessionData();
+  if (message.hasMedia) {
+    console.log(`📦 Message has media. Type: ${message.type}, From: ${message.author}`);
+    mediaData = await this.downloadMedia(message);
   }
 
-  async downloadMedia(message) {
-    try {
-      console.log(`🎬 Starting media download for message ${message.id.id}`);
-      
-      let media = null;
-      let attempts = 0;
-      const maxAttempts = 3;
-      
-      while (attempts < maxAttempts && !media) {
-        try {
-          attempts++;
-          console.log(`📥 Download attempt ${attempts}/${maxAttempts}...`);
-          
-          if (message.type === 'video' && attempts > 1) {
-            await new Promise(resolve => setTimeout(resolve, 2000 * attempts));
-          }
-          
-          const downloadPromise = message.downloadMedia();
-          const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Download timeout')), 60000)
-          );
-          
-          media = await Promise.race([downloadPromise, timeoutPromise]);
-          
-        } catch (downloadError) {
-          console.warn(`⚠️ Download attempt ${attempts} failed:`, downloadError.message);
-          if (attempts === maxAttempts) {
-            throw downloadError;
-          }
+  // Use enhanced message creation with metadata
+  const messageData = MessageUtils.createMessageData(message, mediaData?.path || null);
+  
+  // If we have media metadata, merge it
+  if (mediaData && mediaData.metadata) {
+    messageData.metadata.mediaMetadata = {
+      ...messageData.metadata.mediaMetadata,
+      ...mediaData.metadata
+    };
+  }
+  
+  this.messageHistory.push(messageData);
+  
+  if (this.messageHistory.length > 1000) {
+    this.messageHistory = this.messageHistory.slice(-1000);
+  }
+  
+  const grouped = MessageUtils.groupMessages([messageData]);
+  if (grouped.length > 0) {
+    this.rssManager.updateFeed(grouped[0], this.messageHistory);
+    this.io.emit('new_message', grouped[0]);
+  }
+  
+  FileUtils.updateMediaIndex(this.messageHistory);
+  this.saveSessionData();
+}
+
+async downloadMedia(message) {
+  try {
+    console.log(`🎬 Starting media download for message ${message.id.id}`);
+    
+    let media = null;
+    let attempts = 0;
+    const maxAttempts = 3;
+    
+    while (attempts < maxAttempts && !media) {
+      try {
+        attempts++;
+        console.log(`📥 Download attempt ${attempts}/${maxAttempts}...`);
+        
+        if (message.type === 'video' && attempts > 1) {
+          await new Promise(resolve => setTimeout(resolve, 2000 * attempts));
+        }
+        
+        const downloadPromise = message.downloadMedia();
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Download timeout')), 60000)
+        );
+        
+        media = await Promise.race([downloadPromise, timeoutPromise]);
+        
+      } catch (downloadError) {
+        console.warn(`⚠️ Download attempt ${attempts} failed:`, downloadError.message);
+        if (attempts === maxAttempts) {
+          throw downloadError;
         }
       }
+    }
 
-      if (!media?.data) {
-        console.error('❌ Media download failed - no data received');
-        return null;
-      }
-
-      return FileUtils.saveMedia(media, message.id.id);
-      
-    } catch (err) {
-      console.error('❌ Error downloading media:', err.message);
+    if (!media?.data) {
+      console.error('❌ Media download failed - no data received');
       return null;
     }
+
+    // Use enhanced media saving that returns both path and metadata
+    return await FileUtils.saveMedia(media, message.id.id);
+    
+  } catch (err) {
+    console.error('❌ Error downloading media:', err.message);
+    return null;
   }
+}
 
   async selectGroup(groupId) {
     if (!this.isReady || !this.client) {
@@ -577,51 +588,62 @@ class WhatsAppManager {
     return this.selectedUser;
   }
 
-  async fetchHistory(limit = 50) {
-    if (!this.selectedGroup || !this.client) {
-      throw new Error('No group selected or client not ready');
-    }
-    
-    const chat = await this.client.getChatById(this.selectedGroup.id);
-    const messages = await chat.fetchMessages({ limit });
-    
-    const processedMessages = await Promise.all(
-      messages.map(async (msg) => {
-        const existing = this.messageHistory.find(m => m.id === msg.id._serialized);
-        let mediaPath = existing?.mediaPath || null;
-
-        if (existing) {
-          console.log(`🔁 Message ${msg.id._serialized} already exists`);
-        }
-
-        if (msg.hasMedia && !mediaPath) {
-          mediaPath = await this.downloadMedia(msg);
-        }
-
-        return MessageUtils.createMessageData(msg, mediaPath);
-      })
-    );
-
-    const newMessages = processedMessages.filter(
-      msg => !this.messageHistory.some(existing => existing.id === msg.id)
-    );
-    
-    this.messageHistory = MessageUtils.sortMessagesByTimestamp([...this.messageHistory, ...newMessages]);
-    
-    if (this.messageHistory.length > 1000) {
-      this.messageHistory = this.messageHistory.slice(-1000);
-    }
-    
-    FileUtils.updateMediaIndex(this.messageHistory);
-    
-    const filteredMessages = MessageUtils.filterMessagesByUser(processedMessages, this.selectedUser);
-    const grouped = MessageUtils.groupMessages(filteredMessages.reverse());
-    grouped.forEach(group => this.rssManager.updateFeed(group, this.messageHistory));
-    
-    this.saveSessionData();
-    
-    return grouped;
+async fetchHistory(limit = 50) {
+  if (!this.selectedGroup || !this.client) {
+    throw new Error('No group selected or client not ready');
   }
+  
+  const chat = await this.client.getChatById(this.selectedGroup.id);
+  const messages = await chat.fetchMessages({ limit });
+  
+  const processedMessages = await Promise.all(
+    messages.map(async (msg) => {
+      const existing = this.messageHistory.find(m => m.id === msg.id._serialized);
+      let mediaData = null;
+
+      if (existing && existing.mediaPath) {
+        // Use existing media path but we could regenerate metadata if needed
+        mediaData = { path: existing.mediaPath, metadata: existing.metadata?.mediaMetadata };
+        console.log(`🔁 Message ${msg.id._serialized} already exists with media`);
+      } else if (msg.hasMedia && !existing?.mediaPath) {
+        mediaData = await this.downloadMedia(msg);
+      }
+
+      // Create enhanced message data
+      const messageData = MessageUtils.createMessageData(msg, mediaData?.path || null);
+      
+      // Merge media metadata if available
+      if (mediaData && mediaData.metadata) {
+        messageData.metadata.mediaMetadata = {
+          ...messageData.metadata.mediaMetadata,
+          ...mediaData.metadata
+        };
+      }
+
+      return messageData;
+    })
+  );
+
+  const newMessages = processedMessages.filter(
+    msg => !this.messageHistory.some(existing => existing.id === msg.id)
+  );
+  
+  this.messageHistory = MessageUtils.sortMessagesByTimestamp([...this.messageHistory, ...newMessages]);
+  
+  if (this.messageHistory.length > 1000) {
+    this.messageHistory = this.messageHistory.slice(-1000);
+  }
+  
+  FileUtils.updateMediaIndex(this.messageHistory);
+  
+  const filteredMessages = MessageUtils.filterMessagesByUser(processedMessages, this.selectedUser);
+  const grouped = MessageUtils.groupMessages(filteredMessages.reverse());
+  grouped.forEach(group => this.rssManager.updateFeed(group, this.messageHistory));
+  
+  this.saveSessionData();
+  
+  return grouped;
+}
 
   getMessages(grouped = true) {
     if (grouped) {
