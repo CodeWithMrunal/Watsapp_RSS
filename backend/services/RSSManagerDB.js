@@ -435,11 +435,23 @@ async generateFeed(options = {}) {
       if (endDate) query.timestamp.$lte = endDate;
     }
 
+    // DEBUG: Log the query and check what's in the database
+    console.log('🔍 RSS Query:', JSON.stringify(query));
+    
+    // DEBUG: Check all groups in database
+    const allGroups = await Group.find().limit(5);
+    console.log('🔍 Sample groups in DB:', allGroups.map(g => ({ 
+      id: g.id, 
+      groupId: g.groupId,
+      author: g.author,
+      messageCount: g.messageCount 
+    })));
+
     // Get recent message groups
     const groups = await Group.find(query)
       .sort({ startTimestamp: -1 })
-      .limit(limit)
-      .populate('mediaIds');
+      .limit(limit);
+      // Remove .populate('mediaIds') for now as it might be causing issues
 
     console.log(`📊 Generating RSS feed with ${groups.length} message groups`);
 

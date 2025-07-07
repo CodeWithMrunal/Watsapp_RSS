@@ -152,9 +152,58 @@ async createMessageGroups() {
     const groupedMessages = MessageUtils.groupMessages(this.messageHistory);
     
     for (const group of groupedMessages) {
-      // Create group metadata
-      const groupData = MessageUtils.createGroupMetadata(group);
+      if (this.selectedGroup && this.selectedGroup.id) {
+        // Add groupId to all messages in the group
+        group.messages = group.messages.map(msg => ({
+          ...msg,
+          groupId: msg.groupId || this.selectedGroup.id
+        }));
+      }
+      // Create group metadata with proper structure
+      const groupData = {
+        id: group.id,
+        groupId: this.selectedGroup?.id || group.groupId,
+        author: group.author,
+        authorNumber: group.author ? group.author.split('@')[0] : null,
+        startTimestamp: group.timestamp,
+        endTimestamp: group.timestamp,
+        startTime: new Date(group.timestamp * 1000),
+        endTime: new Date(group.timestamp * 1000),
+        duration: 0,
+        durationMinutes: 0,
+        messageCount: group.messages.length,
+        statistics: {
+          totalMessages: group.messages.length,
+          textMessages: group.messages.filter(m => !m.hasMedia).length,
+          mediaMessages: group.messages.filter(m => m.hasMedia).length,
+          linkCount: 0,
+          mentionCount: 0,
+          mediaTypes: {
+            image: 0,
+            video: 0,
+            audio: 0,
+            document: 0,
+            sticker: 0,
+            voice: 0
+          }
+        },
+        messageIds: group.messages.map(m => m.id),
+        mediaIds: [],
+        linkIds: [],
+        averageMessageInterval: 0,
+        createdAt: new Date(),
+        version: '2.0'
+      };
       
+      // Count media types
+      group.messages.forEach(msg => {
+        if (msg.hasMedia && msg.type) {
+          const mediaType = msg.type === 'ptt' ? 'voice' : msg.type;
+          if (groupData.statistics.mediaTypes.hasOwnProperty(mediaType)) {
+            groupData.statistics.mediaTypes[mediaType]++;
+          }
+        }
+      });
       // Save to MongoDB
       await Group.findOneAndUpdate(
         { id: groupData.id },

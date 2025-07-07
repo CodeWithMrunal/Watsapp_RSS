@@ -38,7 +38,7 @@ const groupSchema = new mongoose.Schema({
   
   // Aggregated Data References
   messageIds: [{ type: String }],
-  mediaIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Media' }],
+  mediaIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Media',default:[]}],
   linkIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Link' }],
   
   // Analysis

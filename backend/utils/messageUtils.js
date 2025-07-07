@@ -247,9 +247,13 @@ class MessageUtils {
     const contentHash = this.generateContentHash(cleanedBody);
     
     // Parse group information from message ID
-    const groupMatch = message.id._serialized.match(/(\d+)@g\.us/);
-    const groupId = groupMatch ? groupMatch[1] : null;
-    
+    let groupId = null;
+  if (message.from && message.from.includes('@g.us')) {
+    groupId = message.from;
+  } else if (message.id && message.id._serialized) {
+    const groupMatch = message.id._serialized.match(/(\d+@g\.us)/);
+    groupId = groupMatch ? groupMatch[1] : null;
+  }
     // Enhanced metadata structure
     return {
       // Core identifiers
@@ -320,7 +324,10 @@ class MessageUtils {
     const messages = groupedMessages.messages || [];
     const mediaMessages = messages.filter(m => m.hasMedia);
     const textMessages = messages.filter(m => !m.hasMedia && m.body);
-    
+
+    const firstMessage = messages[0];
+    const groupId = firstMessage?.groupId || firstMessage?.conversationId || firstMessage?.from;
+
     // Aggregate links from all messages
     const allLinks = messages.reduce((acc, msg) => {
       const links = this.extractLinks(msg.body);
@@ -335,7 +342,7 @@ class MessageUtils {
     
     return {
       id: groupedMessages.id,
-      groupId: groupedMessages.groupId,
+      groupId: groupId,
       author: groupedMessages.author,
       authorNumber: groupedMessages.author ? groupedMessages.author.split('@')[0] : null,
       
