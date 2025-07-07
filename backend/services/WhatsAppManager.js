@@ -679,8 +679,9 @@ async createMessageGroups() {
       this.messageHistory = this.messageHistory.slice(-1000);
     }
     
-    // Save to MongoDB if connected
-    if (this.dbConnected) {
+// Save to MongoDB if connected
+let savedMediaId = null;
+if (this.dbConnected) {
   try {
     // Save message
     const savedMessage = await Message.create(messageData);
@@ -697,6 +698,8 @@ async createMessageGroups() {
           console.log(`📦 Media already exists with hash: ${mediaMetadata.fileHash}`);
         }
         
+        savedMediaId = savedMedia._id; // Store the ID for group creation
+        
         await Message.findByIdAndUpdate(savedMessage._id, {
           mediaId: savedMedia._id
         });
@@ -705,6 +708,7 @@ async createMessageGroups() {
           // Handle duplicate media
           const existingMedia = await Media.findOne({ fileHash: mediaMetadata.fileHash });
           if (existingMedia) {
+            savedMediaId = existingMedia._id;
             await Message.findByIdAndUpdate(savedMessage._id, {
               mediaId: existingMedia._id
             });
@@ -714,38 +718,122 @@ async createMessageGroups() {
         }
       }
     }
-        
-        // Update author statistics
-        await Author.findOrCreateByPhone(message.author);
-        
-        // Extract and save links
-        if (messageData.links && messageData.links.length > 0) {
-          for (const link of messageData.links) {
-            await Link.create({
-              ...link,
-              messageId: savedMessage.id,
-              groupId: savedMessage.groupId,
-              author: savedMessage.author,
-              messageTimestamp: savedMessage.timestamp
-            });
-          }
-        }
-        
-        console.log('✅ Message saved to MongoDB');
-      } catch (error) {
-        console.error('❌ Error saving to MongoDB:', error);
+    
+    // Update author statistics
+    await Author.findOrCreateByPhone(message.author);
+    
+    // Extract and save links
+    if (messageData.links && messageData.links.length > 0) {
+      for (const link of messageData.links) {
+        await Link.create({
+          ...link,
+          messageId: savedMessage.id,
+          groupId: savedMessage.groupId,
+          author: savedMessage.author,
+          messageTimestamp: savedMessage.timestamp
+        });
       }
     }
     
-    if (this.dbConnected) {
+    console.log('✅ Message saved to MongoDB');
+  } catch (error) {
+    console.error('❌ Error saving to MongoDB:', error);
+  }
+}
+
+// Create/update group in MongoDB
+if (this.dbConnected) {
   const grouped = MessageUtils.groupMessages([messageData]);
   if (grouped.length > 0) {
-    const groupData = MessageUtils.createGroupMetadata(grouped[0]);
-    await Group.findOneAndUpdate(
-      { id: groupData.id },
-      { $set: groupData },
-      { upsert: true }
-    );
+    const group = grouped[0];
+    
+    // Create group data with proper structure
+    const groupData = {
+      id: group.id,
+      groupId: this.selectedGroup?.id || messageData.groupId,
+      author: group.author,
+      authorNumber: group.author ? group.author.split('@')[0] : null,
+      startTimestamp: group.timestamp,
+      endTimestamp: group.timestamp,
+      startTime: new Date(group.timestamp * 1000),
+      endTime: new Date(group.timestamp * 1000),
+      duration: 0,
+      durationMinutes: 0,
+      messageCount: 1,
+      statistics: {
+        totalMessages: 1,
+        textMessages: messageData.hasMedia ? 0 : 1,
+        mediaMessages: messageData.hasMedia ? 1 : 0,
+        linkCount: messageData.linkCount || 0,
+        mentionCount: messageData.mentionCount || 0,
+        mediaTypes: {
+          image: 0,
+          video: 0,
+          audio: 0,
+          document: 0,
+          sticker: 0,
+          voice: 0
+        }
+      },
+      messageIds: [messageData.id],
+      mediaIds: savedMediaId ? [savedMediaId] : [], // Use the stored media ID
+      linkIds: [],
+      averageMessageInterval: 0,
+      createdAt: new Date(),
+      version: '2.0'
+    };
+    
+    // Update media type count
+    if (messageData.hasMedia && messageData.type) {
+      const mediaType = messageData.type === 'ptt' ? 'voice' : messageData.type;
+      if (groupData.statistics.mediaTypes.hasOwnProperty(mediaType)) {
+        groupData.statistics.mediaTypes[mediaType] = 1;
+      }
+    }
+    
+    // Check if we should update an existing group or create new one
+    const existingGroup = await Group.findOne({
+      author: group.author,
+      groupId: groupData.groupId,
+      endTimestamp: { $gte: group.timestamp - 300 } // Within 5 minutes
+    });
+    
+    if (existingGroup) {
+      // Update existing group
+      existingGroup.endTimestamp = group.timestamp;
+      existingGroup.endTime = new Date(group.timestamp * 1000);
+      existingGroup.duration = existingGroup.endTimestamp - existingGroup.startTimestamp;
+      existingGroup.durationMinutes = Math.round(existingGroup.duration / 60);
+      existingGroup.messageCount += 1;
+      existingGroup.statistics.totalMessages += 1;
+      
+      if (messageData.hasMedia) {
+        existingGroup.statistics.mediaMessages += 1;
+        if (messageData.type) {
+          const mediaType = messageData.type === 'ptt' ? 'voice' : messageData.type;
+          if (existingGroup.statistics.mediaTypes[mediaType] !== undefined) {
+            existingGroup.statistics.mediaTypes[mediaType] += 1;
+          }
+        }
+      } else {
+        existingGroup.statistics.textMessages += 1;
+      }
+      
+      existingGroup.statistics.linkCount += messageData.linkCount || 0;
+      existingGroup.statistics.mentionCount += messageData.mentionCount || 0;
+      existingGroup.messageIds.push(messageData.id);
+      
+      if (savedMediaId) {
+        existingGroup.mediaIds.push(savedMediaId);
+      }
+      
+      await existingGroup.save();
+      console.log('✅ Updated existing group in MongoDB');
+    } else {
+      // Create new group
+      await Group.create(groupData);
+      console.log('✅ Created new group in MongoDB');
+    }
   }
 }
 
