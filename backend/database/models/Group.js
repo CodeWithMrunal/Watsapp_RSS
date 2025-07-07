@@ -245,19 +245,46 @@ authorSchema.statics.getTopAuthors = function(limit = 10, groupId = null) {
 
 authorSchema.statics.findOrCreateByPhone = async function(phoneNumber, displayName = null) {
   const id = phoneNumber.includes('@') ? phoneNumber : `${phoneNumber}@c.us`;
+  const phoneNum = phoneNumber.replace('@c.us', '').replace('@g.us', '');
   
-  let author = await this.findOne({ id });
-  
-  if (!author) {
-    author = await this.create({
-      id,
-      phoneNumber: phoneNumber.replace('@c.us', '').replace('@g.us', ''),
-      displayName
-    });
-  } else if (displayName && !author.displayName) {
-    author.displayName = displayName;
-    await author.save();
-  }
+  const author = await this.findOneAndUpdate(
+    { id },
+    {
+      $setOnInsert: {
+        id,
+        phoneNumber: phoneNum,
+        totalMessages: 0,
+        textMessages: 0,
+        mediaMessages: 0,
+        totalLinks: 0,
+        totalMentions: 0,
+        mediaTypes: {
+          image: 0,
+          video: 0,
+          audio: 0,
+          document: 0,
+          sticker: 0,
+          voice: 0
+        },
+        groups: [],
+        groupCount: 0,
+        recentActivity: [],
+        preferredLanguage: 'unknown',
+        emojiUsage: false,
+        createdAt: new Date(),
+        version: '2.0'
+      },
+      $set: {
+        ...(displayName && { displayName }),
+        lastUpdated: new Date()
+      }
+    },
+    {
+      upsert: true,
+      new: true,
+      runValidators: true
+    }
+  );
   
   return author;
 };

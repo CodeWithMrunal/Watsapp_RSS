@@ -283,6 +283,62 @@ function handleFileBasedRSS(req, res) {
     }
   });
 
+router.get('/debug-links', async (req, res) => {
+  try {
+    const Message = require('../database/models/Message');
+    const { Link } = require('../database/models/Group');
+    
+    // Find messages with links
+    const messagesWithLinks = await Message.find({ 
+      linkCount: { $gt: 0 } 
+    }).limit(10);
+    
+    // Get link counts
+    const linkCount = await Link.countDocuments();
+    
+    res.json({
+      messagesWithLinks: messagesWithLinks.length,
+      totalLinks: linkCount,
+      sampleMessages: messagesWithLinks.map(m => ({
+        id: m.id,
+        linkCount: m.linkCount,
+        links: m.links
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+  // Test endpoint to check Link model
+router.post('/test-link', async (req, res) => {
+  try {
+    const { Link } = require('../database/models/Group');
+    
+    const testLink = await Link.create({
+      url: 'https://test.example.com',
+      type: 'general',
+      platform: 'unknown',
+      domain: 'test.example.com',
+      messageId: 'test-message-id',
+      groupId: 'test-group-id',
+      author: 'test@author.com',
+      messageTimestamp: Date.now() / 1000,
+      extractedAt: new Date()
+    });
+    
+    res.json({ 
+      success: true, 
+      link: testLink,
+      count: await Link.countDocuments()
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      error: error.message,
+      stack: error.stack 
+    });
+  }
+});
   // Media info endpoint
   router.get('/media-info/:filename', (req, res) => {
     try {

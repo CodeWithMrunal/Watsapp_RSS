@@ -685,7 +685,7 @@ if (this.dbConnected) {
   try {
     // Save message
     const savedMessage = await Message.create(messageData);
-    
+    console.log('✅ Message saved to MongoDB with ID:', savedMessage.id);
     // Save media metadata if exists
     if (mediaMetadata) {
       try {
@@ -722,18 +722,35 @@ if (this.dbConnected) {
     // Update author statistics
     await Author.findOrCreateByPhone(message.author);
     
+    console.log('🔍 Checking for links in messageData:', {
+      hasLinks: !!messageData.links,
+      linkCount: messageData.links?.length || 0,
+      links: messageData.links
+    });
+
     // Extract and save links
     if (messageData.links && messageData.links.length > 0) {
-      for (const link of messageData.links) {
-        await Link.create({
-          ...link,
-          messageId: savedMessage.id,
-          groupId: savedMessage.groupId,
-          author: savedMessage.author,
-          messageTimestamp: savedMessage.timestamp
-        });
-      }
+  console.log(`🔗 Starting to save ${messageData.links.length} links...`);
+  
+  for (const link of messageData.links) {
+    try {
+      const linkDoc = await Link.create({
+        ...link,
+        messageId: savedMessage.id,
+        groupId: savedMessage.groupId,
+        author: savedMessage.author,
+        authorNumber: savedMessage.authorNumber,
+        messageTimestamp: savedMessage.timestamp,
+        domain: this.extractDomain(link.url) // Add domain extraction
+      });
+      console.log(`✅ Link saved: ${link.url}`);
+    } catch (linkError) {
+      console.error(`❌ Error saving link ${link.url}:`, linkError);
     }
+  }
+} else {
+  console.log('🔗 No links found in message');
+}
     
     console.log('✅ Message saved to MongoDB');
   } catch (error) {
@@ -857,7 +874,14 @@ if (grouped.length > 0) {
     FileUtils.updateMediaIndex(this.messageHistory);
     await this.saveSessionData();
   }
-
+extractDomain(url) {
+  try {
+    const urlObj = new URL(url);
+    return urlObj.hostname;
+  } catch {
+    return 'invalid';
+  }
+}
   // Enhanced downloadMedia to return metadata
   async downloadMedia(message) {
     try {
@@ -960,116 +984,142 @@ if (grouped.length > 0) {
     return this.selectedUser;
   }
 
-  async fetchHistory(limit = 50) {
-    if (!this.selectedGroup || !this.client) {
-      throw new Error('No group selected or client not ready');
-    }
-    
-    const chat = await this.client.getChatById(this.selectedGroup.id);
-    const messages = await chat.fetchMessages({ limit });
-    
-    const processedMessages = await Promise.all(
-      messages.map(async (msg) => {
-        const existing = this.messageHistory.find(m => m.id === msg.id._serialized);
-        let mediaPath = existing?.mediaPath || null;
-        let mediaMetadata = null;
+async fetchHistory(limit = 50) {
+  if (!this.selectedGroup || !this.client) {
+    throw new Error('No group selected or client not ready');
+  }
+  
+  const chat = await this.client.getChatById(this.selectedGroup.id);
+  const messages = await chat.fetchMessages({ limit });
+  
+  const processedMessages = await Promise.all(
+    messages.map(async (msg) => {
+      const existing = this.messageHistory.find(m => m.id === msg.id._serialized);
+      let mediaPath = existing?.mediaPath || null;
+      let mediaMetadata = null;
 
-        if (existing) {
-          console.log(`🔁 Message ${msg.id._serialized} already exists`);
-        }
+      if (existing) {
+        console.log(`🔁 Message ${msg.id._serialized} already exists`);
+      }
 
-        if (msg.hasMedia && !mediaPath) {
-          const mediaResult = await this.downloadMedia(msg);
-          if (mediaResult) {
-            mediaPath = mediaResult.path;
-            mediaMetadata = mediaResult.metadata;
-          }
-        }
-
-        const messageData = MessageUtils.createMessageData(msg, mediaPath);
-        
-        // Save to MongoDB if connected and not existing
-        // In the fetchHistory method, replace the media saving section with:
-if (this.dbConnected && !existing) {
-  try {
-    const savedMessage = await Message.create(messageData);
-    
-    if (mediaMetadata) {
-      try {
-        // Check if media already exists by fileHash
-        let savedMedia = await Media.findOne({ fileHash: mediaMetadata.fileHash });
-        
-        if (!savedMedia) {
-          // Create new media entry only if it doesn't exist
-          savedMedia = await Media.create(mediaMetadata);
-        } else {
-          console.log(`📦 Media already exists with hash: ${mediaMetadata.fileHash}`);
-        }
-        
-        // Update message with media reference
-        await Message.findByIdAndUpdate(savedMessage._id, {
-          mediaId: savedMedia._id
-        });
-      } catch (mediaError) {
-        if (mediaError.code === 11000) {
-          // Duplicate key error - media already exists
-          console.log('📦 Media already exists, linking to existing entry');
-          const existingMedia = await Media.findOne({ fileHash: mediaMetadata.fileHash });
-          if (existingMedia) {
-            await Message.findByIdAndUpdate(savedMessage._id, {
-              mediaId: existingMedia._id
-            });
-          }
-        } else {
-          throw mediaError;
+      if (msg.hasMedia && !mediaPath) {
+        const mediaResult = await this.downloadMedia(msg);
+        if (mediaResult) {
+          mediaPath = mediaResult.path;
+          mediaMetadata = mediaResult.metadata;
         }
       }
-    }
-  } catch (error) {
-    console.error('Error saving historical message:', error);
+
+      const messageData = MessageUtils.createMessageData(msg, mediaPath);
+      
+      // Save to MongoDB if connected and not existing
+      if (this.dbConnected && !existing) {
+        try {
+          const savedMessage = await Message.create(messageData);
+          console.log(`✅ Historical message saved: ${savedMessage.id}`);
+          
+          if (mediaMetadata) {
+            try {
+              // Check if media already exists by fileHash
+              let savedMedia = await Media.findOne({ fileHash: mediaMetadata.fileHash });
+              
+              if (!savedMedia) {
+                // Create new media entry only if it doesn't exist
+                savedMedia = await Media.create(mediaMetadata);
+              } else {
+                console.log(`📦 Media already exists with hash: ${mediaMetadata.fileHash}`);
+              }
+              
+              // Update message with media reference
+              await Message.findByIdAndUpdate(savedMessage._id, {
+                mediaId: savedMedia._id
+              });
+            } catch (mediaError) {
+              if (mediaError.code === 11000) {
+                // Duplicate key error - media already exists
+                console.log('📦 Media already exists, linking to existing entry');
+                const existingMedia = await Media.findOne({ fileHash: mediaMetadata.fileHash });
+                if (existingMedia) {
+                  await Message.findByIdAndUpdate(savedMessage._id, {
+                    mediaId: existingMedia._id
+                  });
+                }
+              } else {
+                throw mediaError;
+              }
+            }
+          }
+          
+          // ADD THIS SECTION - Save links
+          if (messageData.links && messageData.links.length > 0) {
+            console.log(`🔗 Saving ${messageData.links.length} links from historical message`);
+            
+            for (const link of messageData.links) {
+              try {
+                await Link.create({
+                  ...link,
+                  messageId: savedMessage.id,
+                  groupId: savedMessage.groupId,
+                  author: savedMessage.author,
+                  authorNumber: savedMessage.authorNumber,
+                  messageTimestamp: savedMessage.timestamp,
+                  domain: this.extractDomain(link.url)
+                });
+                console.log(`✅ Historical link saved: ${link.url}`);
+              } catch (linkError) {
+                console.error(`❌ Error saving historical link ${link.url}:`, linkError.message);
+              }
+            }
+          }
+          
+          // ADD THIS - Update author statistics
+          await Author.findOrCreateByPhone(savedMessage.author);
+          
+        } catch (error) {
+          console.error('Error saving historical message:', error);
+        }
+      }
+      
+      return messageData;
+    })
+  );
+
+  const newMessages = processedMessages.filter(
+    msg => !this.messageHistory.some(existing => existing.id === msg.id)
+  );
+  
+  this.messageHistory = MessageUtils.sortMessagesByTimestamp([...this.messageHistory, ...newMessages]);
+  
+  if (this.messageHistory.length > 1000) {
+    this.messageHistory = this.messageHistory.slice(-1000);
   }
-}
-        
-        return messageData;
-      })
-    );
-
-    const newMessages = processedMessages.filter(
-      msg => !this.messageHistory.some(existing => existing.id === msg.id)
-    );
-    
-    this.messageHistory = MessageUtils.sortMessagesByTimestamp([...this.messageHistory, ...newMessages]);
-    
-    if (this.messageHistory.length > 1000) {
-      this.messageHistory = this.messageHistory.slice(-1000);
-    }
-    
-    FileUtils.updateMediaIndex(this.messageHistory);
-    
-    // Create groups in MongoDB
-if (this.dbConnected) {
-  await this.createMessageGroups();
-}
-
-const filteredMessages = MessageUtils.filterMessagesByUser(processedMessages, this.selectedUser);
-const grouped = MessageUtils.groupMessages(filteredMessages.reverse());
-
-// Update RSS feed
-if (this.dbConnected && this.rssManager.generateFeed) {
-  // Generate RSS from database
-  await this.rssManager.generateFeed({
-    groupId: this.selectedGroup.id,
-    limit: 50
-  });
-} else {
-  // Fallback to file-based RSS
-  grouped.forEach(group => this.rssManager.updateFeed(group, this.messageHistory));
-}
-    
-    await this.saveSessionData();
-    
-    return grouped;
+  
+  FileUtils.updateMediaIndex(this.messageHistory);
+  
+  // Create groups in MongoDB
+  if (this.dbConnected) {
+    await this.createMessageGroups();
   }
+  
+  const filteredMessages = MessageUtils.filterMessagesByUser(processedMessages, this.selectedUser);
+  const grouped = MessageUtils.groupMessages(filteredMessages.reverse());
+  
+  // Update RSS feed
+  if (this.dbConnected && this.rssManager.generateFeed) {
+    // Generate RSS from database
+    await this.rssManager.generateFeed({
+      groupId: this.selectedGroup.id,
+      limit: 50
+    });
+  } else {
+    // Fallback to file-based RSS
+    grouped.forEach(group => this.rssManager.updateFeed(group, this.messageHistory));
+  }
+  
+  await this.saveSessionData();
+  
+  return grouped;
+}
 
   getMessages(grouped = true) {
     if (grouped) {

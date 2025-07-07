@@ -242,6 +242,9 @@ class MessageUtils {
     
     // Extract rich metadata
     const links = this.extractLinks(cleanedBody);
+    if (links.length > 0) {
+  console.log(`🔗 Extracted ${links.length} links from message:`, links);
+}
     const mentions = this.extractMentions(cleanedBody);
     const analysis = this.analyzeMessage(cleanedBody);
     const contentHash = this.generateContentHash(cleanedBody);

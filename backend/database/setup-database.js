@@ -43,20 +43,20 @@ async function setup() {
 //     }
 
     // 4. Create directory structure
-    console.log('\n4️⃣ Creating directory structure...');
-    const directories = [
-      'backend/database/models',
-      'backend/database/migrations',
-      'backend/media/thumbnails',
-      'backend/logs',
-      'backend/backups',
-      'backend/temp'
-    ];
+    // console.log('\n4️⃣ Creating directory structure...');
+    // const directories = [
+    //   'backend/database/models',
+    //   'backend/database/migrations',
+    //   'backend/media/thumbnails',
+    //   'backend/logs',
+    //   'backend/backups',
+    //   'backend/temp'
+    // ];
 
-    for (const dir of directories) {
-      await fs.ensureDir(path.join(__dirname, dir));
-    }
-    console.log('   ✅ Directory structure created');
+    // for (const dir of directories) {
+    //   await fs.ensureDir(path.join(__dirname, dir));
+    // }
+    // console.log('   ✅ Directory structure created');
 
     // 5. Test MongoDB connection
     console.log('\n5️⃣ Testing MongoDB connection...');
