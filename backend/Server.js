@@ -262,11 +262,6 @@ class WhatsAppMonitorServer {
       res.json(docs);
     });
     
-    // Catch-all route for SPA-like behavior
-    this.app.get('*', (req, res) => {
-      // For any unmatched route, redirect to the main RSS view
-      res.redirect('/api/rss-view');
-    });
     
     // Error handling middleware
     this.app.use((err, req, res, next) => {
@@ -370,7 +365,11 @@ class WhatsAppMonitorServer {
         res.status(500).json({ error: error.message });
       }
     });
-    
+    // Catch-all route for SPA-like behavior
+    this.app.get('*', (req, res) => {
+      // For any unmatched route, redirect to the main RSS view
+      res.redirect('/api/rss-view');
+    });
     // Migration endpoint
     this.app.post('/api/migrate', async (req, res) => {
       try {

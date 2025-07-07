@@ -167,35 +167,94 @@ function createApiRoutes(whatsappManager) {
     }
   });
 
-  // Enhanced RSS web view endpoint with XML button
-  router.get('/rss-view', (req, res) => {
-    try {
-      // Read the RSS feed file
-      const rssPath = path.join(__dirname, '../rss/feed.xml');
-      const messagesPath = path.join(__dirname, '../rss/messages.json');
-      
-      if (!fs.existsSync(rssPath) || !fs.existsSync(messagesPath)) {
-        return res.status(404).send(generateEmptyFeedHTML());
+// Enhanced RSS web view endpoint with MongoDB support
+router.get('/rss-view', async (req, res) => {
+  try {
+    // Check if MongoDB is connected
+    const status = whatsappManager.getStatus();
+    const isMongoConnected = status.databaseConnected;
+    
+    if (isMongoConnected) {
+      // Fetch from MongoDB
+      try {
+        const Message = require('../database/models/Message');
+        const { Group } = require('../database/models/Group');
+        
+        // Get recent groups
+        const groups = await Group.find()
+          .sort({ startTimestamp: -1 })
+          .limit(50)
+          .lean();
+        
+        if (!groups || groups.length === 0) {
+          return res.status(404).send(generateEmptyFeedHTML());
+        }
+        
+        // Get messages for each group
+        for (const group of groups) {
+          if (group.messageIds && group.messageIds.length > 0) {
+            const messages = await Message.find({
+              id: { $in: group.messageIds }
+            }).lean();
+            
+            group.messages = messages;
+          } else {
+            group.messages = [];
+          }
+        }
+        
+        // Convert to expected format
+        const formattedGroups = groups.map(group => ({
+          id: group.id,
+          author: group.author,
+          timestamp: group.startTimestamp,
+          messages: group.messages || [],
+          type: 'group',
+          messageCount: group.messageCount || group.messages.length
+        }));
+        
+        const html = generateRSSWebView(formattedGroups, whatsappManager);
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(html);
+        
+      } catch (dbError) {
+        console.error('Error fetching from MongoDB:', dbError);
+        // Fallback to file-based approach
+        return handleFileBasedRSS(req, res);
       }
-
-      const rawMessages = JSON.parse(fs.readFileSync(messagesPath, 'utf8'));
-      console.log('Raw messages structure:', JSON.stringify(rawMessages, null, 2));
-      
-      // Convert messages to the expected format
-      const messages = convertToExpectedFormat(rawMessages);
-      console.log('Converted messages count:', messages.length);
-      
-      const html = generateRSSWebView(messages, whatsappManager);
-      
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(html);
-      
-    } catch (error) {
-      console.error('Error generating RSS web view:', error);
-      console.error('Error stack:', error.stack);
-      res.status(500).send(`<h1>Error loading RSS feed</h1><p>${error.message}</p><pre>${error.stack}</pre>`);
+    } else {
+      // Use file-based approach
+      return handleFileBasedRSS(req, res);
     }
-  });
+    
+  } catch (error) {
+    console.error('Error generating RSS web view:', error);
+    console.error('Error stack:', error.stack);
+    res.status(500).send(`<h1>Error loading RSS feed</h1><p>${error.message}</p><pre>${error.stack}</pre>`);
+  }
+});
+
+// Helper function for file-based RSS
+function handleFileBasedRSS(req, res) {
+  const rssPath = path.join(__dirname, '../rss/feed.xml');
+  const messagesPath = path.join(__dirname, '../rss/messages.json');
+  
+  if (!fs.existsSync(rssPath) || !fs.existsSync(messagesPath)) {
+    return res.status(404).send(generateEmptyFeedHTML());
+  }
+
+  const rawMessages = JSON.parse(fs.readFileSync(messagesPath, 'utf8'));
+  console.log('Raw messages structure:', JSON.stringify(rawMessages, null, 2));
+  
+  // Convert messages to the expected format
+  const messages = convertToExpectedFormat(rawMessages);
+  console.log('Converted messages count:', messages.length);
+  
+  const html = generateRSSWebView(messages, whatsappManager);
+  
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(html);
+}
 
   // Individual message view
   router.get('/message/:messageId', (req, res) => {
