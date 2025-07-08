@@ -575,9 +575,18 @@ async downloadMedia(message) {
       console.error('❌ Media download failed - no data received');
       return null;
     }
+// Save media and get both path and metadata
+    const savedMedia = await FileUtils.saveMedia(media, message.id.id);
+    
+    if (!savedMedia) {
+      return null;
+    }
 
-    // Use enhanced media saving that returns both path and metadata
-    return await FileUtils.saveMedia(media, message.id.id);
+    // Ensure the structure includes both path and metadata
+    return {
+      path: savedMedia.path,
+      metadata: savedMedia.metadata || {}
+    };
     
   } catch (err) {
     console.error('❌ Error downloading media:', err.message);
@@ -705,11 +714,19 @@ async fetchHistory(limit = 50) {
         keywords: group.metadata?.keywords || [],
         urls: group.metadata?.urls || []
       },
-      allMessages: group.messages.map(msg => ({
-        ...msg,
-        messageHash: msg.messageHash || msg.metadata?.messageHash || this.generateMessageHash(msg),
-        metadata: msg.metadata || {}
-      }))
+      // In the enrichedGroups mapping section, update the allMessages part:
+allMessages: group.messages.map(msg => ({
+  ...msg,
+  messageHash: msg.messageHash || msg.metadata?.messageHash || this.generateMessageHash(msg),
+  metadata: {
+    ...msg.metadata,
+    mediaMetadata: msg.metadata?.mediaMetadata ? {
+      ...msg.metadata.mediaMetadata,
+      filepath: msg.mediaPath || msg.metadata.mediaMetadata.filepath,
+      fileHash: msg.metadata.mediaMetadata.fileHash || msg.metadata.mediaMetadata.file_hash
+    } : null
+  }
+}))
     };
     
     return enrichedGroup;

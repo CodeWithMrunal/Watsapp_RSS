@@ -12,25 +12,31 @@ class FileUtils {
     console.log('✅ All directories ensured');
   }
 
-  static async saveMedia(mediaData, messageId) {
-    try {
-      const ext = mediaData.mimetype.split('/')[1] || 'bin';
-      const filename = `media_${Date.now()}_${messageId}.${ext}`;
-      const mediaPath = path.join('media', filename);
-      const fullPath = path.join(__dirname, '..', mediaPath);
+static async saveMedia(mediaData, messageId) {
+  try {
+    const ext = mediaData.mimetype.split('/')[1] || 'bin';
+    const filename = `media_${Date.now()}_${messageId}.${ext}`;
+    const mediaPath = path.join('media', filename);
+    const fullPath = path.join(__dirname, '..', mediaPath);
 
-      fs.writeFileSync(fullPath, mediaData.data, { encoding: 'base64' });
-      console.log(`✅ Media saved to: ${mediaPath}`);
-      
-      // Generate enhanced metadata for the saved media
-      const mediaMetadata = await this.generateMediaMetadata(fullPath, mediaData, filename, messageId);
-      
-      return { path: mediaPath, metadata: mediaMetadata };
-    } catch (error) {
-      console.error('❌ Error saving media:', error);
-      return null;
-    }
+    fs.writeFileSync(fullPath, mediaData.data, { encoding: 'base64' });
+    console.log(`✅ Media saved to: ${mediaPath}`);
+    
+    // Generate enhanced metadata for the saved media
+    const mediaMetadata = await this.generateMediaMetadata(fullPath, mediaData, filename, messageId);
+    
+    return { 
+      path: mediaPath, 
+      metadata: {
+        ...mediaMetadata,
+        filepath: mediaPath // Ensure filepath is included
+      }
+    };
+  } catch (error) {
+    console.error('❌ Error saving media:', error);
+    return null;
   }
+}
 
   static async generateMediaMetadata(filePath, mediaData, filename, messageId) {
     const stats = fs.statSync(filePath);
@@ -112,12 +118,18 @@ class FileUtils {
     return bytes.toFixed(1) + ' ' + units[u];
   }
 
-  static async generateFileHash(filepath) {
+static async generateFileHash(filepath) {
+  try {
     const fileBuffer = fs.readFileSync(filepath);
     const hashSum = crypto.createHash('sha256');
     hashSum.update(fileBuffer);
     return hashSum.digest('hex').substring(0, 16);
+  } catch (error) {
+    console.error('Error generating file hash:', error);
+    // Return a random hash if file can't be read
+    return crypto.randomBytes(16).toString('hex').substring(0, 16);
   }
+}
 
   static saveJSON(filePath, data) {
     try {

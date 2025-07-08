@@ -9,25 +9,39 @@ class DatabaseService {
     this.isInitialized = false;
   }
 
-  async initialize(forceSync = false) {
-    try {
-      console.log('🔄 Initializing database service...');
-      
-      // Initialize models
-      this.models = initializeModels();
-      
-      // Sync database
-      await syncDatabase(forceSync);
-      
-      this.isInitialized = true;
-      console.log('✅ Database service initialized');
-      
+async initialize(forceSync = false) {
+  try {
+    console.log('🔄 Initializing database service...');
+    
+    // Check if already initialized
+    if (this.isInitialized && !forceSync) {
+      console.log('✅ Database service already initialized');
       return true;
-    } catch (error) {
-      console.error('❌ Failed to initialize database:', error);
-      throw error;
     }
+    
+    // Initialize models
+    this.models = initializeModels();
+    
+    // Only sync if forced or tables don't exist
+    try {
+      // Check if tables exist
+      await this.models.Author.findOne({ limit: 1 });
+      console.log('✅ Database tables already exist');
+    } catch (error) {
+      // Tables don't exist, create them
+      console.log('📊 Creating database tables...');
+      await syncDatabase(false);
+    }
+    
+    this.isInitialized = true;
+    console.log('✅ Database service initialized');
+    
+    return true;
+  } catch (error) {
+    console.error('❌ Failed to initialize database:', error);
+    throw error;
   }
+}
 
   // Author operations
   async findOrCreateAuthor(authorData) {
@@ -52,41 +66,108 @@ class DatabaseService {
   }
 
   // Media operations
-  async saveMedia(mediaData) {
-    try {
-      const [media, created] = await this.models.Media.findOrCreate({
-        where: { file_hash: mediaData.fileHash },
-        defaults: {
-          filename: mediaData.filename,
-          original_filename: mediaData.originalFilename,
-          filepath: mediaData.filepath,
-          filesize: mediaData.filesize,
-          filesize_human: mediaData.filesizeHuman,
-          mimetype: mediaData.mimetype,
-          media_type: mediaData.mediaType,
-          extension: mediaData.extension,
-          width: mediaData.dimensions?.width,
-          height: mediaData.dimensions?.height,
-          aspect_ratio: mediaData.dimensions?.aspectRatio,
-          duration: mediaData.duration,
-          thumbnail_path: mediaData.thumbnail,
-          whatsapp_media_key: mediaData.mediaKey,
-          caption: mediaData.caption,
-          compression_ratio: mediaData.compressionRatio,
-          file_created_at: mediaData.createdAt,
-          file_modified_at: mediaData.modifiedAt,
-          uploaded_at: mediaData.uploadedAt,
-          processing_version: mediaData.processingVersion,
-          metadata: mediaData.metadata || {}
-        }
-      });
+async saveMedia(mediaData) {
+  try {
+    console.log('📊 saveMedia called with:', {
+      hasFileHash: !!mediaData?.fileHash,
+      hasFilepath: !!mediaData?.filepath,
+      mediaDataKeys: mediaData ? Object.keys(mediaData) : 'undefined',
+      mediaData: mediaData
+    });
 
-      return media;
-    } catch (error) {
-      console.error('Error saving media:', error);
-      throw error;
+    // Validate mediaData
+    if (!mediaData || typeof mediaData !== 'object') {
+      console.error('❌ Invalid mediaData provided to saveMedia');
+      return null;
     }
+
+    // Generate file hash if not provided
+    let fileHash = mediaData.fileHash || mediaData.file_hash;
+    
+    if (!fileHash && mediaData.filepath) {
+      const crypto = require('crypto');
+      const fs = require('fs');
+      
+      try {
+        const fullPath = mediaData.filepath.startsWith('/') ? 
+          mediaData.filepath : 
+          path.join(__dirname, '..', mediaData.filepath);
+          
+        if (fs.existsSync(fullPath)) {
+          const fileBuffer = fs.readFileSync(fullPath);
+          const hashSum = crypto.createHash('sha256');
+          hashSum.update(fileBuffer);
+          fileHash = hashSum.digest('hex').substring(0, 16);
+        } else {
+          console.warn(`File not found: ${fullPath}`);
+          fileHash = crypto.randomBytes(16).toString('hex').substring(0, 16);
+        }
+      } catch (error) {
+        console.warn('Could not generate file hash:', error.message);
+        fileHash = crypto.randomBytes(16).toString('hex').substring(0, 16);
+      }
+    } else if (!fileHash) {
+      // No filepath and no hash - generate random
+      const crypto = require('crypto');
+      fileHash = crypto.randomBytes(16).toString('hex').substring(0, 16);
+    }
+
+    console.log(`✅ Using file hash: ${fileHash}`);
+
+    const [media, created] = await this.models.Media.findOrCreate({
+      where: { file_hash: fileHash },
+      defaults: {
+        filename: mediaData.filename || 'unknown',
+        original_filename: mediaData.originalFilename || mediaData.original_filename || mediaData.filename,
+        filepath: mediaData.filepath || mediaData.path || '',
+        filesize: mediaData.filesize || 0,
+        filesize_human: mediaData.filesizeHuman || mediaData.filesize_human || this.humanFileSize(mediaData.filesize || 0),
+        mimetype: mediaData.mimetype || 'application/octet-stream',
+        media_type: mediaData.mediaType || mediaData.media_type || 'other',
+        extension: mediaData.extension || '.bin',
+        width: mediaData.dimensions?.width || mediaData.width,
+        height: mediaData.dimensions?.height || mediaData.height,
+        aspect_ratio: mediaData.dimensions?.aspectRatio || mediaData.aspect_ratio,
+        duration: mediaData.duration,
+        thumbnail_path: mediaData.thumbnail || mediaData.thumbnail_path,
+        whatsapp_media_key: mediaData.mediaKey || mediaData.whatsapp_media_key,
+        caption: mediaData.caption,
+        compression_ratio: mediaData.compressionRatio || mediaData.compression_ratio,
+        file_created_at: mediaData.createdAt || mediaData.created_at,
+        file_modified_at: mediaData.modifiedAt || mediaData.modified_at,
+        uploaded_at: mediaData.uploadedAt || mediaData.uploaded_at || new Date(),
+        processing_version: mediaData.processingVersion || mediaData.processing_version || '1.0',
+        metadata: mediaData.metadata || {}
+      }
+    });
+
+    if (created) {
+      console.log(`✅ Created new media record with hash: ${fileHash}`);
+    } else {
+      console.log(`✅ Found existing media record with hash: ${fileHash}`);
+    }
+
+    return media;
+  } catch (error) {
+    console.error('❌ Error saving media:', error);
+    throw error;
   }
+}
+
+// Helper method to generate human-readable file size
+humanFileSize(bytes) {
+  const thresh = 1024;
+  if (Math.abs(bytes) < thresh) {
+    return bytes + ' B';
+  }
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let u = -1;
+  do {
+    bytes /= thresh;
+    ++u;
+  } while (Math.abs(bytes) >= thresh && u < units.length - 1);
+  return bytes.toFixed(1) + ' ' + units[u];
+}
 
   // Message Group operations
   async createMessageGroup(groupData) {
@@ -157,11 +238,33 @@ class DatabaseService {
         name: messageData.author
       });
 
-      // Save media if present
-      let media = null;
-      if (messageData.hasMedia && messageData.metadata?.mediaMetadata) {
-        media = await this.saveMedia(messageData.metadata.mediaMetadata);
+    // Save media if present
+    let media = null;
+    if (messageData.hasMedia) {
+      console.log('📷 Message has media, processing...');
+      
+      // Check different possible locations for media metadata
+      const mediaMetadata = messageData.metadata?.mediaMetadata || 
+                           messageData.mediaMetadata ||
+                           (messageData.mediaPath ? {
+                             filepath: messageData.mediaPath,
+                             filename: path.basename(messageData.mediaPath),
+                             mimetype: messageData.mimetype || 'application/octet-stream',
+                             mediaType: messageData.type
+                           } : null);
+      
+      if (mediaMetadata) {
+        console.log('📊 Media metadata found:', {
+          hasFilepath: !!mediaMetadata.filepath,
+          hasFileHash: !!mediaMetadata.fileHash,
+          keys: Object.keys(mediaMetadata)
+        });
+        
+        media = await this.saveMedia(mediaMetadata);
+      } else {
+        console.warn('⚠️ No media metadata found for media message');
       }
+    }
 
       // Create message
       const message = await this.models.Message.create({

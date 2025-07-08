@@ -11,7 +11,8 @@ class RSSManager {
     this.initialize();
   }
 
-  async initialize() {
+async initialize() {
+  try {
     // Initialize RSS feed
     this.rssFeed = new RSS({
       ...config.rss,
@@ -24,12 +25,15 @@ class RSSManager {
     
     // Initialize database if not already done
     if (!this.databaseService.isInitialized) {
-      await this.databaseService.initialize();
+      await this.databaseService.initialize(false); // Don't force sync
     }
     
     console.log('✅ RSS Feed initialized with database support');
+  } catch (error) {
+    console.error('⚠️ RSS Manager initialization error:', error);
+    // Don't throw - allow the app to continue even if DB has issues
   }
-
+}
   /**
    * Generate RSS feed from database
    */

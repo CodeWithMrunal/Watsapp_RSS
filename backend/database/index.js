@@ -19,6 +19,11 @@ const sequelize = new Sequelize({
   }
 });
 
+// Enable foreign key constraints for SQLite
+if (dbConfig.dialect === 'sqlite') {
+  sequelize.query('PRAGMA foreign_keys = ON;');
+}
+
 // Test connection
 const testConnection = async () => {
   try {
@@ -89,7 +94,13 @@ const initializeModels = () => {
 // Sync database
 const syncDatabase = async (force = false) => {
   try {
-    await sequelize.sync({ force, alter: !force });
+    // Only use alter in development when explicitly needed
+    const syncOptions = {
+      force: force,
+      alter: false // Don't alter tables by default
+    };
+    
+    await sequelize.sync(syncOptions);
     console.log(`✅ Database synchronized ${force ? '(forced)' : ''}`);
   } catch (error) {
     console.error('❌ Error synchronizing database:', error);
