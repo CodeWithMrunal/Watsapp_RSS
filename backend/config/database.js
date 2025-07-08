@@ -2,7 +2,7 @@ module.exports = {
   development: {
     dialect: 'sqlite',
     storage: './database/whatsapp_monitor.sqlite',
-    logging: console.log, // Set to false to disable SQL logging
+    logging: false, // Set to false to disable SQL logging
     pool: {
       max: 5,
       min: 0,

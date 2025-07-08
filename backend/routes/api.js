@@ -8,6 +8,10 @@ const router = express.Router();
 
 function createApiRoutes(whatsappManager) {
   // Existing routes (keeping all your current functionality)
+  // Ensure database is initialized
+if (!whatsappManager.rssManager || !whatsappManager.rssManager.databaseService) {
+  console.warn('⚠️ Database service not initialized in RSS Manager');
+}
   router.get('/status', (req, res) => {
     res.json(whatsappManager.getStatus());
   });
@@ -168,22 +172,35 @@ function createApiRoutes(whatsappManager) {
   });
 
   // Enhanced RSS web view endpoint with XML button
-  router.get('/rss-view', (req, res) => {
+  router.get('/rss-view', async (req, res) => {
     try {
-      // Read the RSS feed file
-      const rssPath = path.join(__dirname, '../rss/feed.xml');
-      const messagesPath = path.join(__dirname, '../rss/messages.json');
-      
-      if (!fs.existsSync(rssPath) || !fs.existsSync(messagesPath)) {
-        return res.status(404).send(generateEmptyFeedHTML());
-      }
+      // Check if RSS feed exists
+const rssPath = path.join(__dirname, '../rss/feed.xml');
 
-      const rawMessages = JSON.parse(fs.readFileSync(messagesPath, 'utf8'));
-      console.log('Raw messages structure:', JSON.stringify(rawMessages, null, 2));
-      
-      // Convert messages to the expected format
-      const messages = convertToExpectedFormat(rawMessages);
-      console.log('Converted messages count:', messages.length);
+if (!fs.existsSync(rssPath)) {
+  return res.status(404).send(generateEmptyFeedHTML());
+}
+
+// Get messages from database
+const databaseService = whatsappManager.rssManager.databaseService;
+const groups = await databaseService.getMessageGroups({ limit: 50 });
+
+// Convert database groups to expected format
+const messages = groups.map(group => ({
+  id: group.id,
+  author: group.author.name || group.author.whatsapp_id,
+  timestamp: group.start_timestamp,
+  messages: group.messages.map(msg => ({
+    id: msg.whatsapp_id,
+    body: msg.body,
+    type: msg.type,
+    hasMedia: msg.has_media,
+    mediaPath: msg.media?.filepath,
+    caption: msg.media?.caption,
+    timestamp: msg.timestamp
+  })),
+  type: 'group'
+}));
       
       const html = generateRSSWebView(messages, whatsappManager);
       
@@ -198,31 +215,61 @@ function createApiRoutes(whatsappManager) {
   });
 
   // Individual message view
-  router.get('/message/:messageId', (req, res) => {
-    try {
-      const { messageId } = req.params;
-      const messagesPath = path.join(__dirname, '../rss/messages.json');
-      
-      if (!fs.existsSync(messagesPath)) {
-        return res.status(404).send('<h1>Messages not found</h1>');
-      }
+router.get('/message/:messageId', async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const databaseService = whatsappManager.rssManager.databaseService;
 
-      const messages = JSON.parse(fs.readFileSync(messagesPath, 'utf8'));
-      const messageGroup = messages.find(group => group.id === messageId);
-      
-      if (!messageGroup) {
-        return res.status(404).send('<h1>Message not found</h1>');
-      }
+    // Fetch the message group with its author, messages, and media
+    const messageGroup = await databaseService.models.MessageGroup.findByPk(messageId, {
+      include: [
+        {
+          model: databaseService.models.Author,
+          as: 'author'
+        },
+        {
+          model: databaseService.models.Message,
+          as: 'messages',
+          include: [
+            {
+              model: databaseService.models.Media,
+              as: 'media'
+            }
+          ]
+        }
+      ]
+    });
 
-      const html = generateSingleMessageView(messageGroup);
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(html);
-      
-    } catch (error) {
-      console.error('Error loading message:', error);
-      res.status(500).send(`<h1>Error loading message</h1><p>${error.message}</p>`);
+    if (!messageGroup) {
+      return res.status(404).send('<h1>Message not found</h1>');
     }
-  });
+
+    // Transform the result to match expected format
+    const formattedGroup = {
+      id: messageGroup.id,
+      author: messageGroup.author.name || messageGroup.author.whatsapp_id,
+      timestamp: messageGroup.start_timestamp,
+      messages: messageGroup.messages.map(msg => ({
+        id: msg.whatsapp_id,
+        body: msg.body,
+        type: msg.type,
+        hasMedia: msg.has_media,
+        mediaPath: msg.media?.filepath || null,
+        caption: msg.media?.caption || null,
+        timestamp: msg.timestamp
+      }))
+    };
+
+    const html = generateSingleMessageView(formattedGroup);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+
+  } catch (error) {
+    console.error('Error loading message:', error);
+    res.status(500).send(`<h1>Error loading message</h1><p>${error.message}</p>`);
+  }
+});
+
 
   // Media info endpoint
   router.get('/media-info/:filename', (req, res) => {
@@ -262,33 +309,32 @@ function createApiRoutes(whatsappManager) {
   });
 
   // Debug endpoint to inspect message structure
-  router.get('/debug-messages', (req, res) => {
-    try {
-      const messagesPath = path.join(__dirname, '../rss/messages.json');
-      
-      if (!fs.existsSync(messagesPath)) {
-        return res.json({ 
-          error: 'No messages file found',
-          suggestion: 'Try fetching some messages first through your WhatsApp monitor'
-        });
-      }
-
-      const rawMessages = JSON.parse(fs.readFileSync(messagesPath, 'utf8'));
-      
-      res.json({
-        messageCount: Array.isArray(rawMessages) ? rawMessages.length : 'Not an array',
-        messageStructure: rawMessages,
-        firstMessage: Array.isArray(rawMessages) && rawMessages.length > 0 ? rawMessages[0] : null,
-        dataType: typeof rawMessages,
-        isArray: Array.isArray(rawMessages)
-      });
-      
-    } catch (error) {
-      console.error('Error reading debug messages:', error);
-      res.status(500).json({ error: error.message, stack: error.stack });
-    }
-  });
-
+router.get('/debug-messages', async (req, res) => {
+  try {
+    const databaseService = whatsappManager.rssManager.databaseService;
+    const stats = await databaseService.getGlobalStatistics();
+    const recentGroups = await databaseService.getMessageGroups({ limit: 5 });
+    
+    res.json({
+      database: {
+        totalMessages: stats.totalMessages,
+        totalGroups: stats.totalGroups,
+        totalAuthors: stats.totalAuthors,
+        totalMedia: stats.totalMedia
+      },
+      recentGroups: recentGroups.map(g => ({
+        id: g.id,
+        author: g.author.name,
+        messageCount: g.message_count,
+        timestamp: new Date(g.start_timestamp * 1000).toISOString()
+      })),
+      feedExists: fs.existsSync(path.join(__dirname, '../rss/feed.xml'))
+    });
+  } catch (error) {
+    console.error('Error in debug endpoint:', error);
+    res.status(500).json({ error: error.message, stack: error.stack });
+  }
+});
   return router;
 }
 
