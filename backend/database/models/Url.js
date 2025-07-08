@@ -30,6 +30,27 @@ module.exports = (sequelize, DataTypes) => {
     occurrence_count: {
       type: DataTypes.INTEGER,
       defaultValue: 1
+    },
+    // Add the new columns from Selenium script
+    is_processed: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false
+    },
+    processed_at: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
+    processing_error: {
+      type: DataTypes.TEXT,
+      allowNull: true
+    },
+    media_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: {
+        model: 'media',
+        key: 'id'
+      }
     }
   }, {
     tableName: 'urls',
@@ -39,6 +60,9 @@ module.exports = (sequelize, DataTypes) => {
       },
       {
         fields: ['url_type']
+      },
+      {
+        fields: ['is_processed', 'url_type']
       }
     ]
   });
@@ -49,6 +73,12 @@ module.exports = (sequelize, DataTypes) => {
       foreignKey: 'url_id',
       otherKey: 'message_id',
       as: 'messages'
+    });
+    
+    // Add association to Media
+    Url.belongsTo(models.Media, {
+      foreignKey: 'media_id',
+      as: 'media'
     });
   };
 

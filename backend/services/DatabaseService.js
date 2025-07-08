@@ -68,12 +68,12 @@ async initialize(forceSync = false) {
   // Media operations
 async saveMedia(mediaData) {
   try {
-    console.log('📊 saveMedia called with:', {
-      hasFileHash: !!mediaData?.fileHash,
-      hasFilepath: !!mediaData?.filepath,
-      mediaDataKeys: mediaData ? Object.keys(mediaData) : 'undefined',
-      mediaData: mediaData
-    });
+    // console.log('📊 saveMedia called with:', {
+    //   hasFileHash: !!mediaData?.fileHash,
+    //   hasFilepath: !!mediaData?.filepath,
+    //   mediaDataKeys: mediaData ? Object.keys(mediaData) : 'undefined',
+    //   mediaData: mediaData
+    // });
 
     // Validate mediaData
     if (!mediaData || typeof mediaData !== 'object') {
@@ -232,6 +232,26 @@ humanFileSize(bytes) {
     const transaction = await sequelize.transaction();
     
     try {
+          // Check if message already exists
+    const existingMessage = await this.models.Message.findOne({
+      where: { 
+        whatsapp_id: messageData.id 
+      },
+      transaction
+    });
+
+    if (existingMessage) {
+      console.log(`📋 Message already exists: ${messageData.id}`);
+      await transaction.commit();
+      return existingMessage;
+    }
+
+    // Generate message hash if not provided
+    if (!messageData.messageHash) {
+      const crypto = require('crypto');
+      const content = `${messageData.id}-${messageData.author}-${messageData.timestamp}-${messageData.body || ''}`;
+      messageData.messageHash = crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
+    }
       // Find or create author
       const author = await this.findOrCreateAuthor({
         whatsapp_id: messageData.author,

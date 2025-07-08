@@ -97,7 +97,17 @@ const syncDatabase = async (force = false) => {
     // Only use alter in development when explicitly needed
     const syncOptions = {
       force: force,
-      alter: false // Don't alter tables by default
+      alter: false,// Don't alter tables by default
+      // Add this to handle external schema changes
+      hooks: {
+        beforeSync: async () => {
+          // Check for columns added by external scripts
+          const queryInterface = sequelize.getQueryInterface();
+          const tableDescription = await queryInterface.describeTable('urls').catch(() => ({}));
+          
+          console.log('📊 Current urls table structure:', Object.keys(tableDescription));
+        }
+      }
     };
     
     await sequelize.sync(syncOptions);
