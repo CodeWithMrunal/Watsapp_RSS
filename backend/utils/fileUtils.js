@@ -304,7 +304,7 @@ class FileUtils {
   }
 
   static generateGroupHash(group) {
-    const content = `${group.groupId}-${group.author}-${group.startTimestamp}-${group.endTimestamp}-${group.messages.length}`;
+    const content = `${group.groupId || 'unknown'}-${group.author}-${group.startTimestamp || group.timestamp}-${group.messages?.length || 0}`;
     return crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
   }
 

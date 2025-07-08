@@ -2,41 +2,204 @@ const RSS = require('rss');
 const fs = require('fs-extra');
 const path = require('path');
 const config = require('../config');
+const DatabaseService = require('./DatabaseService');
 
 class RSSManager {
   constructor() {
     this.rssFeed = null;
+    this.databaseService = new DatabaseService();
     this.initialize();
   }
 
-  initialize() {
+  async initialize() {
+    // Initialize RSS feed
     this.rssFeed = new RSS({
       ...config.rss,
-      // Enhanced RSS configuration
       custom_namespaces: {
         'content': 'http://purl.org/rss/1.0/modules/content/',
         'media': 'http://search.yahoo.com/mrss/',
         'dc': 'http://purl.org/dc/elements/1.1/'
       }
     });
-    console.log('✅ RSS Feed initialized with enhanced features');
+    
+    // Initialize database if not already done
+    if (!this.databaseService.isInitialized) {
+      await this.databaseService.initialize();
+    }
+    
+    console.log('✅ RSS Feed initialized with database support');
   }
 
   /**
-   * Get media type and generate appropriate HTML
+   * Generate RSS feed from database
    */
-  generateMediaHTML(mediaPath, messageBody, mediaType) {
-    if (!mediaPath) return '';
+  async generateFeedFromDatabase(options = {}) {
+    try {
+      const { 
+        limit = 50, 
+        authorId = null, 
+        groupId = null,
+        mediaOnly = false,
+        startDate = null,
+        endDate = null
+      } = options;
 
-    const mediaUrl = `http://localhost:${config.server.port}/media/${path.basename(mediaPath)}`;
-    const caption = messageBody ? this.formatMessageForRSS(messageBody) : '';
+      // Reset feed
+      this.rssFeed = new RSS({
+        ...config.rss,
+        custom_namespaces: {
+          'content': 'http://purl.org/rss/1.0/modules/content/',
+          'media': 'http://search.yahoo.com/mrss/',
+          'dc': 'http://purl.org/dc/elements/1.1/'
+        }
+      });
+
+      // Get message groups from database
+      const groups = await this.databaseService.getMessageGroups({
+        limit,
+        authorId,
+        startDate,
+        endDate
+      });
+
+      // Add CSS and JS to the feed
+      const enhancedCSS = this.generateEnhancedCSS();
+      const enhancedJS = this.generateEnhancedJS();
+
+      // Process each group
+      for (const group of groups) {
+        await this.addGroupToFeed(group, enhancedCSS, enhancedJS);
+      }
+
+      // Save the feed
+      const rssXml = this.rssFeed.xml({ indent: true });
+      fs.writeFileSync('./rss/feed.xml', rssXml);
+      
+      console.log(`✅ RSS feed generated from database with ${groups.length} groups`);
+      
+      return {
+        success: true,
+        groupCount: groups.length,
+        feedPath: './rss/feed.xml'
+      };
+    } catch (error) {
+      console.error('❌ Error generating RSS feed from database:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Add a message group to the RSS feed
+   */
+  async addGroupToFeed(group, css, js) {
+    let description = '';
+    let mediaCount = 0;
+    let linkCount = 0;
     
-    switch (mediaType) {
+    // Add CSS and JS
+    description += css;
+    description += js;
+    
+    // Start message container
+    description += '<div class="message-container">';
+    description += `<div class="message-header">
+      <div class="author-name">${group.author.name || group.author.whatsapp_id}</div>
+      <div class="message-time">${new Date(group.start_timestamp * 1000).toLocaleString()}</div>
+    </div>`;
+    description += '<div class="message-content">';
+
+    // Process each message in the group
+    for (const message of group.messages) {
+      if (message.type === 'chat' && message.body) {
+        // Text message
+        const formattedBody = this.formatMessageForRSS(message.body);
+        description += `<div class="text-message">${formattedBody}</div>`;
+        linkCount += message.url_count || 0;
+      } else if (message.has_media && message.media) {
+        // Media message
+        mediaCount++;
+        const mediaHTML = this.generateMediaHTMLFromDB(message.media, message.body);
+        description += mediaHTML;
+      }
+    }
+
+    // Close message content
+    description += '</div>';
+    
+    // Add statistics
+    const stats = [];
+    if (group.message_count > 1) {
+      stats.push(`${group.message_count} messages`);
+    }
+    if (group.media_count > 0) {
+      const mediaTypes = Object.entries(group.media_types || {})
+        .map(([type, count]) => `${count} ${type}`)
+        .join(', ');
+      stats.push(`${group.media_count} media files (${mediaTypes})`);
+    }
+    if (group.url_count > 0) {
+      stats.push(`🔗 ${group.url_count} link${group.url_count > 1 ? 's' : ''}`);
+    }
+    if (group.emoji_count > 0) {
+      stats.push(`😊 ${group.emoji_count} emoji${group.emoji_count > 1 ? 's' : ''}`);
+    }
+
+    if (stats.length > 0) {
+      description += `<div class="message-stats">${stats.join(' • ')}</div>`;
+    }
+    
+    // Add sentiment indicator if available
+    if (group.dominant_sentiment && group.dominant_sentiment !== 'neutral') {
+      const sentimentEmoji = group.dominant_sentiment === 'positive' ? '😊' : '😔';
+      description += `<div class="sentiment-indicator">Sentiment: ${sentimentEmoji} ${group.dominant_sentiment}</div>`;
+    }
+    
+    // Close message container
+    description += '</div>';
+
+    // Create RSS item
+    const rssItem = {
+      title: `Messages from ${group.author.name || group.author.whatsapp_id}`,
+      description: description,
+      url: `http://localhost:${config.server.port}/message-group/${group.id}`,
+      date: new Date(group.start_timestamp * 1000),
+      guid: `group-${group.id}`,
+      categories: ['whatsapp', ...group.languages || []],
+      custom_elements: [
+        { 'content:encoded': `<![CDATA[${description}]]>` },
+        { 'dc:creator': group.author.name || group.author.whatsapp_id }
+      ]
+    };
+
+    // Add media enclosure if available
+    if (group.messages.length > 0 && group.messages[0].media) {
+      const firstMedia = group.messages[0].media;
+      rssItem.enclosure = {
+        url: `http://localhost:${config.server.port}/media/${path.basename(firstMedia.filepath)}`,
+        type: firstMedia.mimetype,
+        length: firstMedia.filesize || 0
+      };
+    }
+
+    this.rssFeed.item(rssItem);
+  }
+
+  /**
+   * Generate media HTML from database media object
+   */
+  generateMediaHTMLFromDB(media, caption) {
+    const mediaUrl = `http://localhost:${config.server.port}/media/${path.basename(media.filepath)}`;
+    const formattedCaption = caption ? this.formatMessageForRSS(caption) : '';
+    
+    switch (media.media_type) {
       case 'image':
         return `
           <div class="media-container image-container">
-            <img src="${mediaUrl}" alt="Shared image" class="media-image" loading="lazy" onclick="openImageModal(this)">
-            ${caption ? `<div class="media-caption">${caption}</div>` : ''}
+            <img src="${mediaUrl}" alt="Shared image" class="media-image" loading="lazy" onclick="openImageModal(this)"
+              ${media.width ? `width="${media.width}"` : ''}
+              ${media.height ? `height="${media.height}"` : ''}>
+            ${formattedCaption ? `<div class="media-caption">${formattedCaption}</div>` : ''}
+            <div class="media-info">${media.filesize_human} • ${media.width}x${media.height}</div>
           </div>
         `;
       
@@ -44,43 +207,42 @@ class RSSManager {
         return `
           <div class="media-container video-container">
             <video controls class="media-video" preload="metadata">
-              <source src="${mediaUrl}" type="video/mp4">
-              <source src="${mediaUrl}" type="video/webm">
-              <source src="${mediaUrl}" type="video/quicktime">
+              <source src="${mediaUrl}" type="${media.mimetype}">
               Your browser does not support the video tag.
             </video>
-            ${caption ? `<div class="media-caption">${caption}</div>` : ''}
+            ${formattedCaption ? `<div class="media-caption">${formattedCaption}</div>` : ''}
+            <div class="media-info">${media.filesize_human} • ${media.duration ? `${Math.floor(media.duration / 60)}:${(media.duration % 60).toString().padStart(2, '0')}` : ''}</div>
           </div>
         `;
       
       case 'audio':
-      case 'ptt': // Voice message
         return `
           <div class="media-container audio-container">
             <audio controls class="media-audio">
-              <source src="${mediaUrl}" type="audio/mpeg">
-              <source src="${mediaUrl}" type="audio/ogg">
-              <source src="${mediaUrl}" type="audio/wav">
+              <source src="${mediaUrl}" type="${media.mimetype}">
               Your browser does not support the audio tag.
             </audio>
-            ${caption ? `<div class="media-caption">${caption}</div>` : ''}
+            ${formattedCaption ? `<div class="media-caption">${formattedCaption}</div>` : ''}
+            <div class="media-info">${media.filesize_human} • ${media.duration ? `${Math.floor(media.duration / 60)}:${(media.duration % 60).toString().padStart(2, '0')}` : ''}</div>
           </div>
         `;
       
       case 'document':
-        const fileName = path.basename(mediaPath);
+      case 'pdf':
+        const fileName = media.original_filename || path.basename(media.filepath);
+        const icon = media.media_type === 'pdf' ? '📄' : '📎';
         return `
           <div class="media-container document-container">
             <div class="document-info">
-              <div class="document-icon">📄</div>
+              <div class="document-icon">${icon}</div>
               <div class="document-details">
                 <a href="${mediaUrl}" download="${fileName}" class="document-link">
                   ${fileName}
                 </a>
-                <div class="document-type">Document</div>
+                <div class="document-type">${media.media_type.toUpperCase()} • ${media.filesize_human}</div>
               </div>
             </div>
-            ${caption ? `<div class="media-caption">${caption}</div>` : ''}
+            ${formattedCaption ? `<div class="media-caption">${formattedCaption}</div>` : ''}
           </div>
         `;
       
@@ -89,12 +251,30 @@ class RSSManager {
           <div class="media-container generic-container">
             <div class="generic-media">
               <a href="${mediaUrl}" target="_blank" class="media-link">
-                📎 ${mediaType.toUpperCase()} File
+                📎 ${media.media_type.toUpperCase()} File
               </a>
+              <div class="media-info">${media.filesize_human}</div>
             </div>
-            ${caption ? `<div class="media-caption">${caption}</div>` : ''}
+            ${formattedCaption ? `<div class="media-caption">${formattedCaption}</div>` : ''}
           </div>
         `;
+    }
+  }
+
+  /**
+   * Legacy method - now saves to database instead
+   */
+  async updateFeed(messageGroup, messageHistory) {
+    try {
+      // Save to database
+      await this.databaseService.saveMessageGroup(messageGroup);
+      
+      // Regenerate RSS feed from database
+      await this.generateFeedFromDatabase({ limit: 50 });
+      
+      console.log('✅ RSS feed updated via database');
+    } catch (error) {
+      console.error('❌ Error updating RSS feed:', error);
     }
   }
 
@@ -195,6 +375,14 @@ class RSSManager {
           color: #666;
         }
         
+        .media-info {
+          padding: 8px 12px;
+          background: #f0f0f0;
+          font-size: 12px;
+          color: #666;
+          border-top: 1px solid #eee;
+        }
+        
         .document-container {
           padding: 15px;
         }
@@ -232,6 +420,16 @@ class RSSManager {
           color: #666;
           display: flex;
           gap: 15px;
+        }
+        
+        .sentiment-indicator {
+          margin-top: 10px;
+          padding: 8px 12px;
+          background: #e8f5e9;
+          border-radius: 6px;
+          font-size: 13px;
+          color: #2e7d32;
+          display: inline-block;
         }
         
         .link-preview {
@@ -441,158 +639,6 @@ class RSSManager {
   }
 
   /**
-   * Enhanced feed update with media support
-   */
-  updateFeed(messageGroup, messageHistory) {
-    if (!this.rssFeed) return;
-
-    let description = '';
-    let title = `Messages from ${messageGroup.author}`;
-    let mediaCount = 0;
-    let linkCount = 0;
-    let hasImages = false;
-    let hasVideos = false;
-    let hasAudio = false;
-
-    // Add CSS and JS to the beginning of description
-    description += this.generateEnhancedCSS();
-    description += this.generateEnhancedJS();
-    
-    // Start message container
-    description += '<div class="message-container">';
-    description += `<div class="message-header">
-      <div class="author-name">${messageGroup.author}</div>
-      <div class="message-time">${new Date(messageGroup.timestamp * 1000).toLocaleString()}</div>
-    </div>`;
-    description += '<div class="message-content">';
-
-    // Process each message in the group
-    messageGroup.messages.forEach((msg, index) => {
-      if (msg.type === 'chat' && msg.body) {
-        // Text message
-        const formattedBody = this.formatMessageForRSS(msg.body);
-        description += `<div class="text-message">${formattedBody}</div>`;
-        
-        // Count links in the message
-        const links = msg.body.match(/https?:\/\/[^\s]+/g) || [];
-        linkCount += links.length;
-      } else if (msg.hasMedia && msg.mediaPath) {
-        // Media message
-        mediaCount++;
-        const mediaHTML = this.generateMediaHTML(msg.mediaPath, msg.body, msg.type);
-        description += mediaHTML;
-        
-        // Track media types
-        switch (msg.type) {
-          case 'image': hasImages = true; break;
-          case 'video': hasVideos = true; break;
-          case 'audio':
-          case 'ptt': hasAudio = true; break;
-        }
-      } else if (msg.hasMedia) {
-        // Media without file (failed download)
-        mediaCount++;
-        const mediaType = msg.type.toUpperCase();
-        const mediaDescription = msg.body ? this.formatMessageForRSS(msg.body) : 'Media file (failed to download)';
-        description += `<div class="media-container generic-container">
-          <div class="document-info">
-            <div class="document-icon">❌</div>
-            <div class="document-details">
-              <strong>[${mediaType} - Download Failed]</strong>
-              <div class="media-caption">${mediaDescription}</div>
-            </div>
-          </div>
-        </div>`;
-      }
-    });
-
-    // Close message content and add stats
-    description += '</div>';
-    
-    // Add message statistics
-    const stats = [];
-    if (messageGroup.messages.length > 1) {
-      stats.push(`${messageGroup.messages.length} messages`);
-    }
-    if (mediaCount > 0) {
-      const mediaTypes = [];
-      if (hasImages) mediaTypes.push('📸 images');
-      if (hasVideos) mediaTypes.push('🎥 videos');
-      if (hasAudio) mediaTypes.push('🎵 audio');
-      stats.push(`${mediaCount} media file${mediaCount > 1 ? 's' : ''} (${mediaTypes.join(', ')})`);
-    }
-    if (linkCount > 0) {
-      stats.push(`🔗 ${linkCount} link${linkCount > 1 ? 's' : ''}`);
-    }
-
-    if (stats.length > 0) {
-      description += `<div class="message-stats">${stats.join(' • ')}</div>`;
-    }
-    
-    // Close message container
-    description += '</div>';
-
-    // Create enhanced RSS item
-    const rssItem = {
-      title: title,
-      description: description,
-      url: `http://localhost:${config.server.port}/message/${messageGroup.id}`,
-      date: new Date(messageGroup.timestamp * 1000),
-      guid: messageGroup.id,
-      categories: [messageGroup.type, 'whatsapp'],
-      custom_elements: [
-        { 'content:encoded': `<![CDATA[${description}]]>` },
-        { 'dc:creator': messageGroup.author }
-      ]
-    };
-
-    // Add media RSS extensions if there are media files
-    if (mediaCount > 0) {
-      rssItem.enclosure = messageGroup.messages
-        .filter(msg => msg.hasMedia && msg.mediaPath)
-        .map(msg => ({
-          url: `http://localhost:${config.server.port}/media/${path.basename(msg.mediaPath)}`,
-          type: this.getMimeType(msg.type),
-          length: 0 // You could calculate file size here
-        }))[0]; // RSS only supports one enclosure, so take the first
-    }
-
-    this.rssFeed.item(rssItem);
-
-    // Save enhanced feed
-    try {
-      fs.ensureDirSync('./rss');
-      
-      // Save RSS feed with proper formatting
-      const rssXml = this.rssFeed.xml({ indent: true });
-      fs.writeFileSync('./rss/feed.xml', rssXml);
-      
-      // Save message history
-      fs.writeFileSync('./rss/messages.json', JSON.stringify(messageHistory, null, 2));
-      
-      // Enhanced logging
-      console.log('✅ Enhanced RSS feed exported');
-      console.log(`   📊 Total message groups: ${messageHistory.length}`);
-      console.log(`   📬 Latest group: ${messageGroup.messages.length} message${messageGroup.messages.length > 1 ? 's' : ''}`);
-      
-      if (mediaCount > 0) {
-        const mediaTypesList = [];
-        if (hasImages) mediaTypesList.push('📸 images');
-        if (hasVideos) mediaTypesList.push('🎥 videos');  
-        if (hasAudio) mediaTypesList.push('🎵 audio');
-        console.log(`   🎬 Media: ${mediaCount} files (${mediaTypesList.join(', ')})`);
-      }
-      
-      if (linkCount > 0) {
-        console.log(`   🔗 Links: ${linkCount}`);
-      }
-      
-    } catch (error) {
-      console.error('❌ Error updating enhanced RSS feed:', error);
-    }
-  }
-
-  /**
    * Get MIME type for media type
    */
   getMimeType(type) {
@@ -604,6 +650,120 @@ class RSSManager {
       'document': 'application/octet-stream'
     };
     return mimeTypes[type] || 'application/octet-stream';
+  }
+
+  /**
+   * Generate statistics feed
+   */
+  async generateStatisticsFeed() {
+    try {
+      const stats = await this.databaseService.getGlobalStatistics();
+      
+      const statsFeed = new RSS({
+        title: 'WhatsApp Monitor Statistics',
+        description: 'Global statistics from WhatsApp monitoring',
+        feed_url: `http://localhost:${config.server.port}/rss/stats.xml`,
+        site_url: `http://localhost:${config.server.port}`,
+        generator: 'WhatsApp Monitor RSS Generator'
+      });
+
+      // Create statistics item
+      let description = '<div class="stats-container">';
+      description += '<h2>WhatsApp Monitor Global Statistics</h2>';
+      
+      // Overall stats
+      description += '<div class="stat-section">';
+      description += '<h3>Overview</h3>';
+      description += `<p>Total Messages: <strong>${stats.totalMessages}</strong></p>`;
+      description += `<p>Total Media Files: <strong>${stats.totalMedia}</strong></p>`;
+      description += `<p>Total Authors: <strong>${stats.totalAuthors}</strong></p>`;
+      description += `<p>Total Message Groups: <strong>${stats.totalGroups}</strong></p>`;
+      description += `<p>Total URLs Shared: <strong>${stats.totalUrls}</strong></p>`;
+      description += `<p>Total Keywords: <strong>${stats.totalKeywords}</strong></p>`;
+      description += '</div>';
+      
+      // Media breakdown
+      if (stats.mediaByType.length > 0) {
+        description += '<div class="stat-section">';
+        description += '<h3>Media Breakdown</h3>';
+        description += '<ul>';
+        stats.mediaByType.forEach(item => {
+          const sizeGB = (item.dataValues.total_size / (1024 * 1024 * 1024)).toFixed(2);
+          description += `<li>${item.media_type}: ${item.dataValues.count} files (${sizeGB} GB)</li>`;
+        });
+        description += '</ul>';
+        description += '</div>';
+      }
+      
+      // Top authors
+      if (stats.topAuthors.length > 0) {
+        description += '<div class="stat-section">';
+        description += '<h3>Top Authors</h3>';
+        description += '<ol>';
+        stats.topAuthors.forEach(author => {
+          description += `<li>${author.name}: ${author.message_count} messages</li>`;
+        });
+        description += '</ol>';
+        description += '</div>';
+      }
+      
+      // Top keywords
+      if (stats.topKeywords.length > 0) {
+        description += '<div class="stat-section">';
+        description += '<h3>Top Keywords</h3>';
+        description += '<ul>';
+        stats.topKeywords.forEach(keyword => {
+          description += `<li>${keyword.word}: ${keyword.frequency} occurrences</li>`;
+        });
+        description += '</ul>';
+        description += '</div>';
+      }
+      
+      // Language distribution
+      if (stats.languageDistribution.length > 0) {
+        description += '<div class="stat-section">';
+        description += '<h3>Language Distribution</h3>';
+        description += '<ul>';
+        stats.languageDistribution.forEach(lang => {
+          description += `<li>${lang.language}: ${lang.dataValues.count} messages</li>`;
+        });
+        description += '</ul>';
+        description += '</div>';
+      }
+      
+      // Sentiment distribution
+      if (stats.sentimentDistribution.length > 0) {
+        description += '<div class="stat-section">';
+        description += '<h3>Sentiment Analysis</h3>';
+        description += '<ul>';
+        stats.sentimentDistribution.forEach(sentiment => {
+          const emoji = sentiment.sentiment === 'positive' ? '😊' : 
+                       sentiment.sentiment === 'negative' ? '😔' : '😐';
+          description += `<li>${emoji} ${sentiment.sentiment}: ${sentiment.dataValues.count} messages</li>`;
+        });
+        description += '</ul>';
+        description += '</div>';
+      }
+      
+      description += '</div>';
+
+      statsFeed.item({
+        title: 'WhatsApp Monitor Statistics',
+        description: description,
+        url: `http://localhost:${config.server.port}/stats`,
+        date: new Date(),
+        guid: `stats-${Date.now()}`
+      });
+
+      const statsXml = statsFeed.xml({ indent: true });
+      fs.writeFileSync('./rss/stats.xml', statsXml);
+      
+      console.log('✅ Statistics RSS feed generated');
+      return true;
+    } catch (error) {
+      console.error('❌ Error generating statistics feed:', error);
+      throw error;
+    }
   }
 
   reset() {

@@ -495,8 +495,44 @@ async handleIncomingMessage(message) {
   
   const grouped = MessageUtils.groupMessages([messageData]);
   if (grouped.length > 0) {
-    this.rssManager.updateFeed(grouped[0], this.messageHistory);
-    this.io.emit('new_message', grouped[0]);
+    // Enrich the group with required fields
+    const enrichedGroup = {
+      ...grouped[0],
+      groupHash: grouped[0].metadata?.groupHash || FileUtils.generateGroupHash(grouped[0]),
+      groupId: this.selectedGroup.id,
+      startTimestamp: grouped[0].timestamp,
+      endTimestamp: grouped[0].timestamp,
+      duration: 0,
+      statistics: {
+        messageCount: 1,
+        mediaCount: messageData.hasMedia ? 1 : 0,
+        textCount: messageData.hasMedia ? 0 : 1,
+        totalCharacters: messageData.metadata?.messageLength || 0,
+        totalWords: messageData.metadata?.wordCount || 0,
+        totalSize: messageData.metadata?.mediaMetadata?.filesize || 0,
+        messagesPerMinute: 0
+      },
+      contentAnalysis: {
+        sentiment: {
+          dominant: messageData.metadata?.sentiment || 'neutral',
+          distribution: { 
+            positive: messageData.metadata?.sentiment === 'positive' ? 1 : 0,
+            negative: messageData.metadata?.sentiment === 'negative' ? 1 : 0,
+            neutral: messageData.metadata?.sentiment === 'neutral' ? 1 : 0
+          }
+        },
+        languages: messageData.metadata?.language ? [messageData.metadata.language] : [],
+        mediaTypes: messageData.hasMedia ? { [messageData.type]: 1 } : {},
+        totalUrls: messageData.metadata?.urlCount || 0,
+        totalEmojis: messageData.metadata?.emojiCount || 0,
+        keywords: [],
+        urls: messageData.metadata?.urls || []
+      },
+      allMessages: [messageData]
+    };
+    
+    await this.rssManager.updateFeed(enrichedGroup, this.messageHistory);
+    this.io.emit('new_message', enrichedGroup);
   }
   
   FileUtils.updateMediaIndex(this.messageHistory);
@@ -602,14 +638,13 @@ async fetchHistory(limit = 50) {
       let mediaData = null;
 
       if (existing && existing.mediaPath) {
-        // Use existing media path but we could regenerate metadata if needed
         mediaData = { path: existing.mediaPath, metadata: existing.metadata?.mediaMetadata };
         console.log(`🔁 Message ${msg.id._serialized} already exists with media`);
       } else if (msg.hasMedia && !existing?.mediaPath) {
         mediaData = await this.downloadMedia(msg);
       }
 
-      // Create enhanced message data
+      // Use enhanced message creation
       const messageData = MessageUtils.createMessageData(msg, mediaData?.path || null);
       
       // Merge media metadata if available
@@ -638,12 +673,69 @@ async fetchHistory(limit = 50) {
   
   const filteredMessages = MessageUtils.filterMessagesByUser(processedMessages, this.selectedUser);
   const grouped = MessageUtils.groupMessages(filteredMessages.reverse());
-  grouped.forEach(group => this.rssManager.updateFeed(group, this.messageHistory));
+  
+  // Process each group to ensure it has all required fields for database
+  const enrichedGroups = grouped.map(group => {
+    // Ensure group has all required fields
+    const enrichedGroup = {
+      ...group,
+      groupHash: group.metadata?.groupHash || FileUtils.generateGroupHash(group),
+      groupId: this.selectedGroup.id,
+      startTimestamp: group.messages[0]?.timestamp || group.timestamp,
+      endTimestamp: group.messages[group.messages.length - 1]?.timestamp || group.timestamp,
+      duration: group.metadata?.duration || 0,
+      statistics: {
+        messageCount: group.messages.length,
+        mediaCount: group.metadata?.mediaCount || 0,
+        textCount: group.metadata?.textMessageCount || 0,
+        totalCharacters: group.metadata?.totalCharacters || 0,
+        totalWords: group.messages.reduce((sum, msg) => sum + (msg.metadata?.wordCount || 0), 0),
+        totalSize: group.messages.reduce((sum, msg) => sum + (msg.metadata?.mediaMetadata?.filesize || 0), 0),
+        messagesPerMinute: group.metadata?.duration > 0 ? (group.messages.length / (group.metadata.duration / 60)).toFixed(2) : 0
+      },
+      contentAnalysis: {
+        sentiment: {
+          dominant: group.metadata?.dominant_sentiment || 'neutral',
+          distribution: group.metadata?.sentiment_scores || { positive: 0, negative: 0, neutral: 0 }
+        },
+        languages: group.metadata?.languages || [],
+        mediaTypes: group.metadata?.mediaTypes || {},
+        totalUrls: group.metadata?.url_count || 0,
+        totalEmojis: group.metadata?.emoji_count || 0,
+        keywords: group.metadata?.keywords || [],
+        urls: group.metadata?.urls || []
+      },
+      allMessages: group.messages.map(msg => ({
+        ...msg,
+        messageHash: msg.messageHash || msg.metadata?.messageHash || this.generateMessageHash(msg),
+        metadata: msg.metadata || {}
+      }))
+    };
+    
+    return enrichedGroup;
+  });
+
+  // Update RSS feed for each group
+  for (const group of enrichedGroups) {
+    try {
+      await this.rssManager.updateFeed(group, this.messageHistory);
+    } catch (error) {
+      console.error(`Error updating RSS for group: ${error.message}`);
+    }
+  }
   
   this.saveSessionData();
   
-  return grouped;
+  return enrichedGroups;
 }
+
+// Helper method to generate message hash if missing
+generateMessageHash(message) {
+  const crypto = require('crypto');
+  const content = `${message.id}-${message.author}-${message.timestamp}-${message.body || ''}`;
+  return crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
+}
+
 
   getMessages(grouped = true) {
     if (grouped) {
