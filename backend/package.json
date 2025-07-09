@@ -8,16 +8,21 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "whatsapp-web.js": "^1.23.0",
-    "qrcode": "^1.5.3",
-    "socket.io": "^4.7.2",
     "cors": "^2.8.5",
-    "rss": "^1.2.2",
+    "dotenv": "^17.1.0",
+    "express": "^4.18.2",
     "fs-extra": "^11.1.1",
     "moment": "^2.29.4",
+    "nodemailer": "^6.9.4",
+    "pg": "^8.16.3",
+    "pg-hstore": "^2.3.4",
+    "qrcode": "^1.5.3",
+    "rss": "^1.2.2",
+    "sequelize": "^6.37.7",
+    "sequelize-cli": "^6.6.3",
+    "socket.io": "^4.7.2",
     "uuid": "^9.0.0",
-    "nodemailer": "^6.9.4"
+    "whatsapp-web.js": "^1.23.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

@@ -13,6 +13,9 @@ const RSSManager = require('./services/RSSManager');
 const WhatsAppManager = require('./services/WhatsAppManager');
 const SocketManager = require('./services/SocketManager');
 
+// Import database sync service
+const WhatsAppDatabaseSync = require('./services/WhatsAppDatabaseSync');
+
 // Import routes
 const createApiRoutes = require('./routes/api');
 
@@ -28,19 +31,57 @@ class WhatsAppMonitorServer {
     this.whatsappManager = null;
     this.socketManager = null;
 
-    this.initialize();
+    // Initialize the server (now async)
+    this.initializeAsync();
   }
 
-  initialize() {
-    console.log('Server.js starting...');
+  async initializeAsync() {
+    try {
+      await this.initialize();
+    } catch (error) {
+      console.error('❌ Failed to initialize server:', error);
+      process.exit(1);
+    }
+  }
+
+  async initialize() {
+    console.log('🚀 Server.js starting...');
     
     // Ensure required directories exist
     FileUtils.ensureDirectories();
+    
+    // Initialize database connection
+    console.log('🔄 Initializing database...');
+    try {
+      await WhatsAppDatabaseSync.initializeDatabase();
+      console.log('✅ Database initialized successfully');
+    } catch (error) {
+      console.error('❌ Database initialization failed:', error);
+      console.log('⚠️  Server will continue without database support');
+      // You can decide whether to exit or continue without DB
+      // throw error; // Uncomment to make database required
+    }
     
     // Initialize services
     this.rssManager = new RSSManager();
     this.whatsappManager = new WhatsAppManager(this.io, this.rssManager);
     this.socketManager = new SocketManager(this.io, this.whatsappManager);
+    
+    // Enhance WhatsApp manager with database sync
+    try {
+      WhatsAppDatabaseSync.enhanceWhatsAppManager(this.whatsappManager);
+      console.log('✅ WhatsApp Manager enhanced with database sync');
+      
+      // Optional: Migrate existing JSON data to database
+      // Uncomment the following lines if you want to migrate existing data on startup
+      /*
+      console.log('🔄 Checking for existing data to migrate...');
+      await WhatsAppDatabaseSync.migrateExistingData();
+      console.log('✅ Data migration complete');
+      */
+    } catch (error) {
+      console.error('⚠️  Could not enhance WhatsApp Manager with database:', error);
+    }
     
     // Setup middleware and routes
     this.setupMiddleware();
@@ -120,10 +161,20 @@ class WhatsAppMonitorServer {
     });
     
     // Health check endpoint with enhanced information
-    this.app.get('/health', (req, res) => {
+    this.app.get('/health', async (req, res) => {
       const status = this.whatsappManager.getStatus();
       const uptime = process.uptime();
       const memoryUsage = process.memoryUsage();
+      
+      // Check database connection
+      let databaseStatus = 'not configured';
+      try {
+        const { sequelize } = require('./models');
+        await sequelize.authenticate();
+        databaseStatus = 'connected';
+      } catch (error) {
+        databaseStatus = 'disconnected';
+      }
       
       res.json({
         status: 'OK',
@@ -141,8 +192,11 @@ class WhatsAppMonitorServer {
             authenticated: status.authenticated,
             ready: status.ready,
             selectedGroup: status.selectedGroup,
-            cachedGroups: status.cachedGroups
+            cachedGroups: status.cachedGroups,
+            messageHistoryCount: status.messageHistoryCount,
+            statistics: status.statistics
           },
+          database: databaseStatus,
           rss: this.rssManager ? 'initialized' : 'not initialized',
           socket: this.socketManager ? 'active' : 'inactive'
         },
@@ -170,7 +224,8 @@ class WhatsAppMonitorServer {
           'GET /api/group-participants': 'Get participants of selected group',
           'POST /api/select-user': 'Filter messages by specific user',
           'POST /api/fetch-history': 'Fetch message history',
-          'GET /api/messages': 'Get current messages',
+          'GET /api/messages': 'Get current messages (with database support)',
+          'GET /api/statistics': 'Get group statistics from database',
           'POST /api/initialize': 'Initialize WhatsApp client',
           'POST /api/logout': 'Logout and clear session',
           'POST /api/backup-messages': 'Backup messages to file',
@@ -191,6 +246,20 @@ class WhatsAppMonitorServer {
             status: 'Status update',
             loading_progress: 'Loading progress update'
           }
+        },
+        database: {
+          enabled: true,
+          models: [
+            'Groups',
+            'Authors',
+            'Messages',
+            'Media',
+            'Links',
+            'Mentions',
+            'Reactions',
+            'MessageGroups',
+            'ConversationSummaries'
+          ]
         }
       });
     });
@@ -242,6 +311,7 @@ class WhatsAppMonitorServer {
       console.log(`📱 Media files served at: http://localhost:${PORT}/media/`);
       console.log(`🔍 API documentation: http://localhost:${PORT}/api-docs`);
       console.log(`💚 Health check: http://localhost:${PORT}/health`);
+      console.log(`💾 Database support: Enabled`);
       
       // Log available endpoints
       console.log('\n📋 Available endpoints:');
@@ -281,6 +351,16 @@ class WhatsAppMonitorServer {
         console.log('📱 Cleaning up WhatsApp manager...');
         await this.whatsappManager.cleanup();
         console.log('✅ WhatsApp manager cleaned up');
+      }
+      
+      // Close database connection
+      try {
+        const { sequelize } = require('./models');
+        console.log('💾 Closing database connection...');
+        await sequelize.close();
+        console.log('✅ Database connection closed');
+      } catch (error) {
+        console.log('⚠️  Could not close database connection:', error.message);
       }
       
       // Close Socket.IO

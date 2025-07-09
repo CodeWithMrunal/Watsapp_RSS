@@ -462,36 +462,41 @@ class WhatsAppManager {
     return this.isReady && this.isAuthenticated && this.client;
   }
 
-  async handleIncomingMessage(message) {
-    console.log('Received message:', message.body || `[${message.type}]`);
-    
-    if (!this.selectedGroup || !message.from.includes('@g.us')) return;
-    if (message.from !== this.selectedGroup.id) return;
-    if (this.selectedUser && message.author !== this.selectedUser) return;
-    
-    let mediaPath = null;
+async handleIncomingMessage(message) {
+  console.log('Received message:', message.body || `[${message.type}]`);
+  
+  if (!this.selectedGroup || !message.from.includes('@g.us')) return;
+  if (message.from !== this.selectedGroup.id) return;
+  if (this.selectedUser && message.author !== this.selectedUser) return;
+  
+  let mediaMetadata = null;
 
-    if (message.hasMedia) {
-      console.log(`📦 Message has media. Type: ${message.type}, From: ${message.author}`);
-      mediaPath = await this.downloadMedia(message);
-    }
-
-    const messageData = MessageUtils.createMessageData(message, mediaPath);
-    this.messageHistory.push(messageData);
-    
-    if (this.messageHistory.length > 1000) {
-      this.messageHistory = this.messageHistory.slice(-1000);
-    }
-    
-    const grouped = MessageUtils.groupMessages([messageData]);
-    if (grouped.length > 0) {
-      this.rssManager.updateFeed(grouped[0], this.messageHistory);
-      this.io.emit('new_message', grouped[0]);
-    }
-    
-    FileUtils.updateMediaIndex(this.messageHistory);
-    this.saveSessionData();
+  if (message.hasMedia) {
+    console.log(`📦 Message has media. Type: ${message.type}, From: ${message.author}`);
+    mediaMetadata = await this.downloadMedia(message);
   }
+
+  // Create message data with enhanced metadata
+  const messageData = MessageUtils.createMessageData(message, mediaMetadata);
+  
+  // Add group name to message data
+  messageData.groupName = this.selectedGroup.name;
+  
+  this.messageHistory.push(messageData);
+  
+  if (this.messageHistory.length > 1000) {
+    this.messageHistory = this.messageHistory.slice(-1000);
+  }
+  
+  const grouped = MessageUtils.groupMessages([messageData]);
+  if (grouped.length > 0) {
+    this.rssManager.updateFeed(grouped[0], this.messageHistory);
+    this.io.emit('new_message', grouped[0]);
+  }
+  
+  FileUtils.updateMediaIndex(this.messageHistory);
+  this.saveSessionData();
+}
 
   async downloadMedia(message) {
     try {
@@ -530,7 +535,13 @@ class WhatsAppManager {
         return null;
       }
 
-      return FileUtils.saveMedia(media, message.id.id);
+      // Pass message data to saveMedia for enhanced metadata extraction
+      return FileUtils.saveMedia(media, message.id.id, {
+        type: message.type,
+        author: message.author,
+        timestamp: message.timestamp,
+        caption: message.caption || message.body
+      });
       
     } catch (err) {
       console.error('❌ Error downloading media:', err.message);
@@ -577,51 +588,77 @@ class WhatsAppManager {
     return this.selectedUser;
   }
 
-  async fetchHistory(limit = 50) {
-    if (!this.selectedGroup || !this.client) {
-      throw new Error('No group selected or client not ready');
-    }
-    
-    const chat = await this.client.getChatById(this.selectedGroup.id);
-    const messages = await chat.fetchMessages({ limit });
-    
-    const processedMessages = await Promise.all(
-      messages.map(async (msg) => {
-        const existing = this.messageHistory.find(m => m.id === msg.id._serialized);
-        let mediaPath = existing?.mediaPath || null;
-
-        if (existing) {
-          console.log(`🔁 Message ${msg.id._serialized} already exists`);
-        }
-
-        if (msg.hasMedia && !mediaPath) {
-          mediaPath = await this.downloadMedia(msg);
-        }
-
-        return MessageUtils.createMessageData(msg, mediaPath);
-      })
-    );
-
-    const newMessages = processedMessages.filter(
-      msg => !this.messageHistory.some(existing => existing.id === msg.id)
-    );
-    
-    this.messageHistory = MessageUtils.sortMessagesByTimestamp([...this.messageHistory, ...newMessages]);
-    
-    if (this.messageHistory.length > 1000) {
-      this.messageHistory = this.messageHistory.slice(-1000);
-    }
-    
-    FileUtils.updateMediaIndex(this.messageHistory);
-    
-    const filteredMessages = MessageUtils.filterMessagesByUser(processedMessages, this.selectedUser);
-    const grouped = MessageUtils.groupMessages(filteredMessages.reverse());
-    grouped.forEach(group => this.rssManager.updateFeed(group, this.messageHistory));
-    
-    this.saveSessionData();
-    
-    return grouped;
+// Update fetchHistory to capture enhanced metadata
+async fetchHistory(limit = 50) {
+  if (!this.selectedGroup || !this.client) {
+    throw new Error('No group selected or client not ready');
   }
+  
+  const chat = await this.client.getChatById(this.selectedGroup.id);
+  const messages = await chat.fetchMessages({ limit });
+  
+  const processedMessages = await Promise.all(
+    messages.map(async (msg) => {
+      const existing = this.messageHistory.find(m => m.id === msg.id._serialized);
+      let mediaMetadata = existing?.mediaMetadata || null;
+
+      if (existing) {
+        console.log(`🔁 Message ${msg.id._serialized} already exists`);
+      }
+
+      if (msg.hasMedia && !mediaMetadata) {
+        mediaMetadata = await this.downloadMedia(msg);
+      }
+
+      const messageData = MessageUtils.createMessageData(msg, mediaMetadata);
+      messageData.groupName = this.selectedGroup.name;
+      
+      return messageData;
+    })
+  );
+
+  const newMessages = processedMessages.filter(
+    msg => !this.messageHistory.some(existing => existing.id === msg.id)
+  );
+  
+  this.messageHistory = MessageUtils.sortMessagesByTimestamp([...this.messageHistory, ...newMessages]);
+  
+  if (this.messageHistory.length > 1000) {
+    this.messageHistory = this.messageHistory.slice(-1000);
+  }
+  
+  FileUtils.updateMediaIndex(this.messageHistory);
+  
+  const filteredMessages = MessageUtils.filterMessagesByUser(processedMessages, this.selectedUser);
+  const grouped = MessageUtils.groupMessages(filteredMessages.reverse());
+  grouped.forEach(group => this.rssManager.updateFeed(group, this.messageHistory));
+  
+  // Generate and save conversation statistics
+  const summary = MessageUtils.generateConversationSummary(this.messageHistory);
+  FileUtils.saveJSON('./rss/conversation-summary.json', summary);
+  
+  this.saveSessionData();
+  
+  return grouped;
+}
+
+// Add new method to get enhanced statistics
+getEnhancedStatistics() {
+  if (this.messageHistory.length === 0) {
+    return null;
+  }
+  
+  const stats = MessageUtils.generateStatistics(this.messageHistory);
+  const summary = MessageUtils.generateConversationSummary(this.messageHistory);
+  
+  return {
+    summary,
+    statistics: stats,
+    currentGroup: this.selectedGroup,
+    currentUser: this.selectedUser,
+    generatedAt: new Date().toISOString()
+  };
+}
 
   getMessages(grouped = true) {
     if (grouped) {
@@ -691,40 +728,56 @@ class WhatsAppManager {
     }
   }
 
-  getStatus() {
-    const sessionExists = fs.existsSync(this.sessionPath);
-    const sessionDataExists = fs.existsSync(this.sessionDataPath);
-    
-    let sessionFileCount = 0;
-    let sessionFolders = [];
-    
-    if (sessionExists) {
-      try {
-        const contents = fs.readdirSync(this.sessionPath, { withFileTypes: true });
-        sessionFileCount = contents.length;
-        sessionFolders = contents
-          .filter(item => item.isDirectory())
-          .map(item => item.name);
-      } catch (err) {
-        console.warn('Could not count session files:', err.message);
-      }
+getStatus() {
+  const sessionExists = fs.existsSync(this.sessionPath);
+  const sessionDataExists = fs.existsSync(this.sessionDataPath);
+  
+  let sessionFileCount = 0;
+  let sessionFolders = [];
+  
+  if (sessionExists) {
+    try {
+      const contents = fs.readdirSync(this.sessionPath, { withFileTypes: true });
+      sessionFileCount = contents.length;
+      sessionFolders = contents
+        .filter(item => item.isDirectory())
+        .map(item => item.name);
+    } catch (err) {
+      console.warn('Could not count session files:', err.message);
     }
-    
-    return {
-      authenticated: this.isAuthenticated,
-      ready: this.isReady,
-      selectedGroup: this.selectedGroup?.name || null,
-      selectedUser: this.selectedUser || null,
-      cachedGroups: this.groupsCache?.length || 0,
-      sessionExists,
-      sessionDataExists,
-      sessionFileCount,
-      sessionFolders,
-      sessionPath: this.sessionPath,
-      messageHistoryCount: this.messageHistory.length,
-      workingDirectory: process.cwd()
+  }
+  
+  // Get enhanced statistics if available
+  let statistics = null;
+  if (this.messageHistory.length > 0) {
+    statistics = {
+      totalMessages: this.messageHistory.length,
+      mediaMessages: this.messageHistory.filter(m => m.hasMedia).length,
+      textMessages: this.messageHistory.filter(m => !m.hasMedia && m.body).length,
+      uniqueAuthors: [...new Set(this.messageHistory.map(m => m.author))].length,
+      dateRange: {
+        start: new Date(this.messageHistory[0].timestamp * 1000).toISOString(),
+        end: new Date(this.messageHistory[this.messageHistory.length - 1].timestamp * 1000).toISOString()
+      }
     };
   }
+  
+  return {
+    authenticated: this.isAuthenticated,
+    ready: this.isReady,
+    selectedGroup: this.selectedGroup?.name || null,
+    selectedUser: this.selectedUser || null,
+    cachedGroups: this.groupsCache?.length || 0,
+    sessionExists,
+    sessionDataExists,
+    sessionFileCount,
+    sessionFolders,
+    sessionPath: this.sessionPath,
+    messageHistoryCount: this.messageHistory.length,
+    workingDirectory: process.cwd(),
+    statistics
+  };
+}
 
   async cleanup() {
     console.log('🧹 Cleaning up WhatsApp manager...');
