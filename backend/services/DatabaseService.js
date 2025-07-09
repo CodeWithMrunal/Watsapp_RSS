@@ -11,6 +11,7 @@ const {
   ConversationSummary,
   sequelize 
 } = require('../models');
+const path = require('path');
 const { Op } = require('sequelize');
 
 class DatabaseService {
@@ -73,73 +74,134 @@ class DatabaseService {
   /**
    * Save a message with all related data
    */
-  static async saveMessage(messageData, groupId) {
-    const transaction = await sequelize.transaction();
-    
-    try {
-      // Ensure author exists
-      const author = await this.upsertAuthor(messageData.authorDetails || { 
-        id: messageData.author,
-        name: messageData.author 
-      });
+// Update the saveMessage method in DatabaseService.js:
 
-      // Create the message - use upsert instead of create
-const [message, created] = await Message.upsert({
-  id: messageData.id,
-  message_id: messageData.messageId || messageData.id,
-  group_id: groupId,
-  author_id: author.id,
-  timestamp: messageData.timestamp,
-  message_date: new Date(messageData.timestamp * 1000),
-  type: messageData.type,
-  body: messageData.body,
-  original_body: messageData.originalBody,
-  caption: messageData.caption,
-  has_media: messageData.hasMedia,
-  is_forwarded: messageData.isForwarded,
-  is_starred: messageData.isStarred,
-  is_deleted: messageData.isDeleted,
-  is_ephemeral: messageData.isEphemeral,
-  is_status: messageData.isStatus,
-  is_broadcast: messageData.isBroadcast,
-  from_jid: messageData.from,
-  to_jid: messageData.to,
-  word_count: messageData.wordCount,
-  char_count: messageData.charCount,
-  detected_language: messageData.detectedLanguage,
-  device_type: messageData.deviceType,
-  quoted_message_id: messageData.quotedMessage?.id,
-  quoted_message_data: messageData.quotedMessage,
-  raw_data: messageData._raw
-}, { 
-  transaction,
-  returning: true 
-});
-// Only process related data if this is a new message
-if (created) {
+static async saveMessage(messageData, groupId) {
+  const transaction = await sequelize.transaction();
+  
+  try {
+    // Ensure author exists
+    const author = await this.upsertAuthor(messageData.authorDetails || { 
+      id: messageData.author,
+      name: messageData.author 
+    });
+
+    // Check if message already exists
+    const existingMessage = await Message.findByPk(messageData.id, { transaction });
+    
+    if (existingMessage) {
+      console.log(`ℹ️ Message ${messageData.id} already exists`);
+      
+      // Check if media needs to be saved
+      if (messageData.hasMedia && !await Media.findOne({ where: { message_id: messageData.id }, transaction })) {
+        console.log('📸 Adding missing media record...');
+        
+        // Handle both new format (mediaMetadata object) and old format (mediaPath string)
+        if (messageData.mediaMetadata || messageData.mediaPath) {
+          const mediaData = messageData.mediaMetadata || {
+            path: messageData.mediaPath,
+            filename: messageData.mediaPath ? path.basename(messageData.mediaPath) : 'unknown',
+            fileSize: 0,
+            mimetype: this.getMimeTypeFromPath(messageData.mediaPath)
+          };
+          
+          await Media.create({
+            message_id: existingMessage.id,
+            file_path: mediaData.path || messageData.mediaPath,
+            filename: mediaData.filename || path.basename(messageData.mediaPath || ''),
+            original_filename: mediaData.originalFilename,
+            file_size: mediaData.fileSize || 0,
+            file_hash: mediaData.fileHash,
+            mimetype: mediaData.mimetype || this.getMimeTypeFromPath(messageData.mediaPath),
+            media_type: messageData.type,
+            width: mediaData.dimensions?.width,
+            height: mediaData.dimensions?.height,
+            duration: mediaData.duration,
+            thumbnail_path: mediaData.thumbnail,
+            is_voice_note: messageData.type === 'ptt' || mediaData.isVoiceNote || false,
+            saved_at: mediaData.savedAt || new Date(),
+            metadata: mediaData
+          }, { transaction });
+          
+          console.log('✅ Media record created for existing message');
+        }
+      }
+      
+      await transaction.commit();
+      return existingMessage;
+    }
+
+    // Create new message using upsert to handle duplicates
+    const [message, created] = await Message.upsert({
+      id: messageData.id,
+      message_id: messageData.messageId || messageData.id,
+      group_id: groupId,
+      author_id: author.id,
+      timestamp: messageData.timestamp,
+      message_date: new Date(messageData.timestamp * 1000),
+      type: messageData.type,
+      body: messageData.body,
+      original_body: messageData.originalBody,
+      caption: messageData.caption,
+      has_media: messageData.hasMedia,
+      is_forwarded: messageData.isForwarded,
+      is_starred: messageData.isStarred,
+      is_deleted: messageData.isDeleted,
+      is_ephemeral: messageData.isEphemeral,
+      is_status: messageData.isStatus,
+      is_broadcast: messageData.isBroadcast,
+      from_jid: messageData.from,
+      to_jid: messageData.to,
+      word_count: messageData.wordCount || 0,
+      char_count: messageData.charCount || 0,
+      detected_language: messageData.detectedLanguage,
+      device_type: messageData.deviceType,
+      quoted_message_id: messageData.quotedMessage?.id,
+      quoted_message_data: messageData.quotedMessage,
+      raw_data: messageData._raw || {}
+    }, { 
+      transaction,
+      returning: true 
+    });
+
+    // Only process related data if this is a new message
+    if (created || !await Media.findOne({ where: { message_id: message.id }, transaction })) {
       // Save media if exists
-      if (messageData.hasMedia && messageData.mediaMetadata) {
+      if (messageData.hasMedia && (messageData.mediaMetadata || messageData.mediaPath)) {
+        console.log('📸 Saving media for message...');
+        
+        // Handle both new format (mediaMetadata object) and old format (mediaPath string)
+        const mediaData = messageData.mediaMetadata || {
+          path: messageData.mediaPath,
+          filename: messageData.mediaPath ? path.basename(messageData.mediaPath) : 'unknown',
+          fileSize: 0,
+          mimetype: this.getMimeTypeFromPath(messageData.mediaPath)
+        };
+
         await Media.create({
           message_id: message.id,
-          file_path: messageData.mediaMetadata.path || messageData.mediaPath,
-          filename: messageData.mediaMetadata.filename,
-          original_filename: messageData.mediaMetadata.originalFilename,
-          file_size: messageData.mediaMetadata.fileSize,
-          file_hash: messageData.mediaMetadata.fileHash,
-          mimetype: messageData.mediaMetadata.mimetype,
+          file_path: mediaData.path || messageData.mediaPath,
+          filename: mediaData.filename || path.basename(messageData.mediaPath || ''),
+          original_filename: mediaData.originalFilename,
+          file_size: mediaData.fileSize || 0,
+          file_hash: mediaData.fileHash,
+          mimetype: mediaData.mimetype || this.getMimeTypeFromPath(messageData.mediaPath),
           media_type: messageData.type,
-          width: messageData.mediaMetadata.dimensions?.width,
-          height: messageData.mediaMetadata.dimensions?.height,
-          duration: messageData.mediaMetadata.duration,
-          thumbnail_path: messageData.mediaMetadata.thumbnail,
-          is_voice_note: messageData.mediaMetadata.isVoiceNote || false,
-          saved_at: messageData.mediaMetadata.savedAt || new Date(),
-          metadata: messageData.mediaMetadata
+          width: mediaData.dimensions?.width,
+          height: mediaData.dimensions?.height,
+          duration: mediaData.duration,
+          thumbnail_path: mediaData.thumbnail,
+          is_voice_note: messageData.type === 'ptt' || mediaData.isVoiceNote || false,
+          saved_at: mediaData.savedAt || new Date(),
+          metadata: mediaData
         }, { transaction });
+        
+        console.log('✅ Media saved successfully');
       }
-
+      
       // Save links
       if (messageData.links && messageData.links.length > 0) {
+        console.log(`🔗 Saving ${messageData.links.length} links...`);
         const linkPromises = messageData.links.map((link, index) => {
           const domain = this.extractDomain(link);
           const linkType = this.categorizeLinkType(link);
@@ -154,8 +216,9 @@ if (created) {
         });
         
         await Promise.all(linkPromises);
+        console.log('✅ Links saved successfully');
       }
-    
+      
       // Save mentions
       if (messageData.mentions && messageData.mentions.length > 0) {
         const mentionPromises = messageData.mentions.map((mention, index) => {
@@ -168,7 +231,7 @@ if (created) {
         
         await Promise.all(mentionPromises);
       }
-
+      
       // Save reactions
       if (messageData.reactions && messageData.reactions.length > 0) {
         const reactionPromises = messageData.reactions.map(reaction => {
@@ -183,70 +246,117 @@ if (created) {
         await Promise.all(reactionPromises);
       }
     }
-      // Update author counters
-      const updateData = {
-        message_count: sequelize.literal('message_count + 1')
-      };
-      
-      if (messageData.hasMedia) {
-        updateData.media_count = sequelize.literal('media_count + 1');
-      }
-      
-      await Author.update(updateData, {
-        where: { id: author.id },
-        transaction
-      });
 
-      // Update group last activity
-      await Group.update(
-        { last_activity: new Date() },
-        { where: { id: groupId }, transaction }
-      );
-
-      await transaction.commit();
-      console.log(`✅ Saved message ${message.id} with all related data`);
-      
-      return message;
-    } catch (error) {
-      await transaction.rollback();
-      console.error('Error saving message:', error);
-      throw error;
+    // Update author counters
+    const updateData = {
+      message_count: sequelize.literal('message_count + 1')
+    };
+    
+    if (messageData.hasMedia) {
+      updateData.media_count = sequelize.literal('media_count + 1');
     }
-  }
+    
+    await Author.update(updateData, {
+      where: { id: author.id },
+      transaction
+    });
 
+    // Update group last activity
+    await Group.update(
+      { last_activity: new Date() },
+      { where: { id: groupId }, transaction }
+    );
+
+    await transaction.commit();
+    console.log(`✅ Saved message ${message.id} with all related data`);
+    
+    return message;
+  } catch (error) {
+    await transaction.rollback();
+    console.error('Error saving message:', error);
+    throw error;
+  }
+}
+
+// Add helper method to guess MIME type from file path
+static getMimeTypeFromPath(filePath) {
+  if (!filePath) return 'application/octet-stream';
+  
+  const ext = path.extname(filePath).toLowerCase();
+  const mimeTypes = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.mp4': 'video/mp4',
+    '.avi': 'video/x-msvideo',
+    '.mov': 'video/quicktime',
+    '.webm': 'video/webm',
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.ogg': 'audio/ogg',
+    '.m4a': 'audio/mp4',
+    '.pdf': 'application/pdf',
+    '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  };
+  
+  return mimeTypes[ext] || 'application/octet-stream';
+}
   /**
    * Save a message group
    */
-    static async saveMessageGroup(groupData) {
-    try {
-        // Map the field names correctly
-        const messageGroup = await MessageGroup.create({
-        id: groupData.id,
-        group_id: groupData.groupId,
-        author_id: groupData.author,
-        // Use 'timestamp' field from the first message if start/end timestamps aren't available
-        start_timestamp: groupData.startTimestamp || groupData.timestamp || (groupData.messages && groupData.messages[0]?.timestamp),
-        end_timestamp: groupData.endTimestamp || groupData.timestamp || (groupData.messages && groupData.messages[groupData.messages.length - 1]?.timestamp),
-        start_date: groupData.startDate || groupData.startTime || new Date((groupData.startTimestamp || groupData.timestamp) * 1000),
-        end_date: groupData.endDate || groupData.endTime || new Date((groupData.endTimestamp || groupData.timestamp) * 1000),
-        duration: groupData.duration || 0,
-        message_count: groupData.messageCount || groupData.messages?.length || 0,
-        media_count: groupData.statistics?.mediaCount || groupData.statistics?.mediaMessages || 0,
-        text_count: groupData.statistics?.textCount || groupData.statistics?.textMessages || 0,
-        link_count: groupData.statistics?.linkCount || 0,
-        mention_count: groupData.statistics?.mentionCount || 0,
-        total_media_size: groupData.totalMediaSize || 0,
-        average_message_length: groupData.averageMessageLength || 0,
-        statistics: groupData.statistics || {}
-        });
+// Update the saveMessageGroup method in DatabaseService.js to handle timestamps better:
 
-        console.log(`✅ Saved message group ${messageGroup.id}`);
-        return messageGroup;
-    } catch (error) {
-        console.error('Error saving message group:', error);
-        throw error;
+static async saveMessageGroup(groupData) {
+  try {
+    // Extract timestamps properly
+    let startTimestamp, endTimestamp;
+    
+    if (groupData.messages && groupData.messages.length > 0) {
+      // Get timestamps from actual messages
+      const timestamps = groupData.messages.map(m => m.timestamp || 0);
+      startTimestamp = Math.min(...timestamps);
+      endTimestamp = Math.max(...timestamps);
+    } else {
+      // Use provided timestamps or defaults
+      startTimestamp = groupData.startTimestamp || groupData.timestamp || Date.now() / 1000;
+      endTimestamp = groupData.endTimestamp || groupData.timestamp || Date.now() / 1000;
     }
-    }
+
+    // Create or update the message group
+    const [messageGroup, created] = await MessageGroup.upsert({
+      id: groupData.id,
+      group_id: groupData.groupId,
+      author_id: groupData.author,
+      start_timestamp: startTimestamp,
+      end_timestamp: endTimestamp,
+      start_date: new Date(startTimestamp * 1000),
+      end_date: new Date(endTimestamp * 1000),
+      duration: endTimestamp - startTimestamp,
+      message_count: groupData.messageCount || groupData.messages?.length || 0,
+      media_count: groupData.statistics?.mediaCount || groupData.statistics?.mediaMessages || 0,
+      text_count: groupData.statistics?.textCount || groupData.statistics?.textMessages || 0,
+      link_count: groupData.statistics?.linkCount || 0,
+      mention_count: groupData.statistics?.mentionCount || 0,
+      total_media_size: groupData.totalMediaSize || 0,
+      average_message_length: groupData.averageMessageLength || 0,
+      statistics: groupData.statistics || {}
+    }, {
+      returning: true
+    });
+
+    console.log(`${created ? '✅ Created' : '✅ Updated'} message group ${messageGroup.id}`);
+    console.log(`   Timestamp range: ${new Date(startTimestamp * 1000).toISOString()} - ${new Date(endTimestamp * 1000).toISOString()}`);
+    console.log(`   Message count: ${messageGroup.message_count}`);
+    
+    return messageGroup;
+  } catch (error) {
+    console.error('Error saving message group:', error);
+    throw error;
+  }
+}
 
   /**
    * Save conversation summary
@@ -369,61 +479,79 @@ if (created) {
   /**
    * Get message groups for RSS
    */
-  static async getMessageGroupsForRSS(groupId, options = {}) {
-    const {
-      limit = 20,
-      offset = 0,
-      authorId = null,
-      startDate = null,
-      endDate = null
-    } = options;
+// Replace the getMessageGroupsForRSS method in DatabaseService.js with this fixed version:
 
-    const whereConditions = { group_id: groupId };
-    
-    if (authorId) whereConditions.author_id = authorId;
-    if (startDate || endDate) {
-      whereConditions.start_date = {};
-      if (startDate) whereConditions.start_date[Op.gte] = startDate;
-      if (endDate) whereConditions.start_date[Op.lte] = endDate;
-    }
+static async getMessageGroupsForRSS(groupId, options = {}) {
+  const {
+    limit = 20,
+    offset = 0,
+    authorId = null,
+    startDate = null,
+    endDate = null
+  } = options;
 
-    const messageGroups = await MessageGroup.findAll({
-      where: whereConditions,
-      include: [
-        {
-          model: Author,
-          attributes: ['id', 'push_name', 'phone_number']
-        }
-      ],
-      order: [['start_timestamp', 'DESC']],
-      limit,
-      offset
-    });
-
-    // For each message group, get the actual messages
-    const enrichedGroups = await Promise.all(
-      messageGroups.map(async (group) => {
-        const messages = await Message.findAll({
-          where: {
-            group_id: groupId,
-            author_id: group.author_id,
-            timestamp: {
-              [Op.between]: [group.start_timestamp, group.end_timestamp]
-            }
-          },
-          include: [Media, Link],
-          order: [['timestamp', 'ASC']]
-        });
-
-        return {
-          ...group.toJSON(),
-          messages: messages.map(m => m.toJSON())
-        };
-      })
-    );
-
-    return enrichedGroups;
+  const whereConditions = { group_id: groupId };
+  
+  if (authorId) whereConditions.author_id = authorId;
+  if (startDate || endDate) {
+    whereConditions.start_date = {};
+    if (startDate) whereConditions.start_date[Op.gte] = startDate;
+    if (endDate) whereConditions.start_date[Op.lte] = endDate;
   }
+
+  // First, get the message groups
+  const messageGroups = await MessageGroup.findAll({
+    where: whereConditions,
+    include: [
+      {
+        model: Author,
+        attributes: ['id', 'push_name', 'phone_number']
+      }
+    ],
+    order: [['start_timestamp', 'DESC']],
+    limit,
+    offset
+  });
+
+  // For each message group, get the actual messages
+  const enrichedGroups = await Promise.all(
+    messageGroups.map(async (group) => {
+      // Fetch messages that belong to this group's time range and author
+      const messages = await Message.findAll({
+        where: {
+          group_id: groupId,
+          author_id: group.author_id,
+          timestamp: {
+            [Op.between]: [group.start_timestamp, group.end_timestamp]
+          }
+        },
+        include: [
+          {
+            model: Media,
+            as: 'Media',
+            required: false,
+            attributes: ['file_path', 'filename', 'file_size', 'mimetype', 'media_type']
+          },
+          {
+            model: Link,
+            as: 'Links',
+            required: false,
+            attributes: ['url', 'domain', 'link_type']
+          }
+        ],
+        order: [['timestamp', 'ASC']]
+      });
+
+      // Convert to plain object and add messages
+      const groupData = group.toJSON();
+      groupData.messages = messages.map(m => m.toJSON());
+      
+      return groupData;
+    })
+  );
+
+  return enrichedGroups;
+}
 
   /**
    * Get statistics for a group

@@ -2,6 +2,7 @@ const RSS = require('rss');
 const fs = require('fs-extra');
 const path = require('path');
 const config = require('../config');
+const DatabaseService = require('./DatabaseService');
 
 class RSSManager {
   constructor() {
@@ -99,7 +100,7 @@ class RSSManager {
   }
 
   /**
-   * Generate enhanced CSS for the RSS feed
+   * Generate enhanced CSS for the RSS feed (same as before)
    */
   generateEnhancedCSS() {
     return `
@@ -315,7 +316,7 @@ class RSSManager {
   }
 
   /**
-   * Generate JavaScript for enhanced functionality
+   * Generate JavaScript for enhanced functionality (same as before)
    */
   generateEnhancedJS() {
     return `
@@ -441,13 +442,54 @@ class RSSManager {
   }
 
   /**
-   * Enhanced feed update with media support
+   * Generate RSS feed from database
    */
-  updateFeed(messageGroup, messageHistory) {
-    if (!this.rssFeed) return;
+  async generateFromDatabase(groupId, options = {}) {
+    const {
+      limit = 20,
+      authorId = null,
+      startDate = null,
+      endDate = null
+    } = options;
 
+    try {
+      console.log('🔄 Generating RSS feed from database...');
+      
+      // Reset the feed
+      this.initialize();
+      
+      // Get message groups from database
+      const messageGroups = await DatabaseService.getMessageGroupsForRSS(groupId, {
+        limit,
+        authorId,
+        startDate,
+        endDate
+      });
+
+      console.log(`📊 Found ${messageGroups.length} message groups in database`);
+
+      // Process each message group
+      for (const group of messageGroups) {
+        await this.addMessageGroupToFeed(group);
+      }
+
+      // Save the feed
+      await this.saveFeed();
+      
+      console.log('✅ RSS feed generated from database successfully');
+      return true;
+    } catch (error) {
+      console.error('❌ Error generating RSS from database:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Add a message group to the RSS feed
+   */
+  async addMessageGroupToFeed(messageGroup) {
     let description = '';
-    let title = `Messages from ${messageGroup.author}`;
+    let title = `Messages from ${messageGroup.Author?.push_name || messageGroup.author_id}`;
     let mediaCount = 0;
     let linkCount = 0;
     let hasImages = false;
@@ -461,69 +503,80 @@ class RSSManager {
     // Start message container
     description += '<div class="message-container">';
     description += `<div class="message-header">
-      <div class="author-name">${messageGroup.author}</div>
-      <div class="message-time">${new Date(messageGroup.timestamp * 1000).toLocaleString()}</div>
+      <div class="author-name">${messageGroup.Author?.push_name || messageGroup.author_id}</div>
+      <div class="message-time">${new Date(messageGroup.start_date).toLocaleString()} - ${new Date(messageGroup.end_date).toLocaleString()}</div>
     </div>`;
     description += '<div class="message-content">';
 
     // Process each message in the group
-    messageGroup.messages.forEach((msg, index) => {
-      if (msg.type === 'chat' && msg.body) {
-        // Text message
-        const formattedBody = this.formatMessageForRSS(msg.body);
-        description += `<div class="text-message">${formattedBody}</div>`;
-        
-        // Count links in the message
-        const links = msg.body.match(/https?:\/\/[^\s]+/g) || [];
-        linkCount += links.length;
-      } else if (msg.hasMedia && msg.mediaPath) {
-        // Media message
-        mediaCount++;
-        const mediaHTML = this.generateMediaHTML(msg.mediaPath, msg.body, msg.type);
-        description += mediaHTML;
-        
-        // Track media types
-        switch (msg.type) {
-          case 'image': hasImages = true; break;
-          case 'video': hasVideos = true; break;
-          case 'audio':
-          case 'ptt': hasAudio = true; break;
-        }
-      } else if (msg.hasMedia) {
-        // Media without file (failed download)
-        mediaCount++;
-        const mediaType = msg.type.toUpperCase();
-        const mediaDescription = msg.body ? this.formatMessageForRSS(msg.body) : 'Media file (failed to download)';
-        description += `<div class="media-container generic-container">
-          <div class="document-info">
-            <div class="document-icon">❌</div>
-            <div class="document-details">
-              <strong>[${mediaType} - Download Failed]</strong>
-              <div class="media-caption">${mediaDescription}</div>
+    if (messageGroup.messages && messageGroup.messages.length > 0) {
+      for (const msg of messageGroup.messages) {
+        if (msg.type === 'chat' && msg.body) {
+          // Text message
+          const formattedBody = this.formatMessageForRSS(msg.body);
+          description += `<div class="text-message">${formattedBody}</div>`;
+          
+          // Count links
+          if (msg.Links) {
+            linkCount += msg.Links.length;
+          }
+        } else if (msg.has_media && msg.Media) {
+          // Media message with database media info
+          mediaCount++;
+          const mediaPath = msg.Media.file_path;
+          const mediaHTML = this.generateMediaHTML(mediaPath, msg.body || msg.caption, msg.type);
+          description += mediaHTML;
+          
+          // Track media types
+          switch (msg.type) {
+            case 'image': hasImages = true; break;
+            case 'video': hasVideos = true; break;
+            case 'audio':
+            case 'ptt': hasAudio = true; break;
+          }
+        } else if (msg.has_media) {
+          // Media without file (failed download)
+          mediaCount++;
+          const mediaType = msg.type.toUpperCase();
+          const mediaDescription = msg.body ? this.formatMessageForRSS(msg.body) : 'Media file (failed to download)';
+          description += `<div class="media-container generic-container">
+            <div class="document-info">
+              <div class="document-icon">❌</div>
+              <div class="document-details">
+                <strong>[${mediaType} - Download Failed]</strong>
+                <div class="media-caption">${mediaDescription}</div>
+              </div>
             </div>
-          </div>
-        </div>`;
+          </div>`;
+        }
       }
-    });
+    }
 
     // Close message content and add stats
     description += '</div>';
     
-    // Add message statistics
+    // Add message statistics from database
     const stats = [];
-    if (messageGroup.messages.length > 1) {
-      stats.push(`${messageGroup.messages.length} messages`);
+    if (messageGroup.message_count > 1) {
+      stats.push(`${messageGroup.message_count} messages`);
     }
-    if (mediaCount > 0) {
+    if (messageGroup.media_count > 0) {
       const mediaTypes = [];
       if (hasImages) mediaTypes.push('📸 images');
       if (hasVideos) mediaTypes.push('🎥 videos');
       if (hasAudio) mediaTypes.push('🎵 audio');
-      stats.push(`${mediaCount} media file${mediaCount > 1 ? 's' : ''} (${mediaTypes.join(', ')})`);
+      stats.push(`${messageGroup.media_count} media file${messageGroup.media_count > 1 ? 's' : ''} (${mediaTypes.join(', ')})`);
     }
-    if (linkCount > 0) {
-      stats.push(`🔗 ${linkCount} link${linkCount > 1 ? 's' : ''}`);
+    if (messageGroup.link_count > 0) {
+      stats.push(`🔗 ${messageGroup.link_count} link${messageGroup.link_count > 1 ? 's' : ''}`);
     }
+    if (messageGroup.mention_count > 0) {
+      stats.push(`👥 ${messageGroup.mention_count} mention${messageGroup.mention_count > 1 ? 's' : ''}`);
+    }
+
+    // Add duration info
+    const duration = this.formatDuration(messageGroup.duration);
+    stats.push(`⏱️ ${duration}`);
 
     if (stats.length > 0) {
       description += `<div class="message-stats">${stats.join(' • ')}</div>`;
@@ -536,30 +589,44 @@ class RSSManager {
     const rssItem = {
       title: title,
       description: description,
-      url: `http://localhost:${config.server.port}/message/${messageGroup.id}`,
-      date: new Date(messageGroup.timestamp * 1000),
+      url: `http://localhost:${config.server.port}/message-group/${messageGroup.id}`,
+      date: new Date(messageGroup.start_date),
       guid: messageGroup.id,
-      categories: [messageGroup.type, 'whatsapp'],
+      categories: ['whatsapp', 'message-group'],
       custom_elements: [
         { 'content:encoded': `<![CDATA[${description}]]>` },
-        { 'dc:creator': messageGroup.author }
+        { 'dc:creator': messageGroup.Author?.push_name || messageGroup.author_id }
       ]
     };
 
     // Add media RSS extensions if there are media files
-    if (mediaCount > 0) {
-      rssItem.enclosure = messageGroup.messages
-        .filter(msg => msg.hasMedia && msg.mediaPath)
-        .map(msg => ({
-          url: `http://localhost:${config.server.port}/media/${path.basename(msg.mediaPath)}`,
-          type: this.getMimeType(msg.type),
-          length: 0 // You could calculate file size here
-        }))[0]; // RSS only supports one enclosure, so take the first
+    if (messageGroup.media_count > 0 && messageGroup.messages) {
+      const firstMedia = messageGroup.messages.find(m => m.has_media && m.Media);
+      if (firstMedia && firstMedia.Media) {
+        rssItem.enclosure = {
+          url: `http://localhost:${config.server.port}/media/${path.basename(firstMedia.Media.file_path)}`,
+          type: firstMedia.Media.mimetype || this.getMimeType(firstMedia.type),
+          length: firstMedia.Media.file_size || 0
+        };
+      }
     }
 
     this.rssFeed.item(rssItem);
+  }
 
-    // Save enhanced feed
+  /**
+   * Format duration helper
+   */
+  formatDuration(seconds) {
+    if (seconds < 60) return `${seconds}s`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+    return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  }
+
+  /**
+   * Save the feed to file
+   */
+  async saveFeed() {
     try {
       fs.ensureDirSync('./rss');
       
@@ -567,28 +634,23 @@ class RSSManager {
       const rssXml = this.rssFeed.xml({ indent: true });
       fs.writeFileSync('./rss/feed.xml', rssXml);
       
-      // Save message history
-      fs.writeFileSync('./rss/messages.json', JSON.stringify(messageHistory, null, 2));
-      
-      // Enhanced logging
-      console.log('✅ Enhanced RSS feed exported');
-      console.log(`   📊 Total message groups: ${messageHistory.length}`);
-      console.log(`   📬 Latest group: ${messageGroup.messages.length} message${messageGroup.messages.length > 1 ? 's' : ''}`);
-      
-      if (mediaCount > 0) {
-        const mediaTypesList = [];
-        if (hasImages) mediaTypesList.push('📸 images');
-        if (hasVideos) mediaTypesList.push('🎥 videos');  
-        if (hasAudio) mediaTypesList.push('🎵 audio');
-        console.log(`   🎬 Media: ${mediaCount} files (${mediaTypesList.join(', ')})`);
-      }
-      
-      if (linkCount > 0) {
-        console.log(`   🔗 Links: ${linkCount}`);
-      }
-      
+      console.log('✅ RSS feed saved to ./rss/feed.xml');
     } catch (error) {
-      console.error('❌ Error updating enhanced RSS feed:', error);
+      console.error('❌ Error saving RSS feed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Legacy method - redirect to database generation
+   */
+  async updateFeed(messageGroup, messageHistory) {
+    console.log('⚠️  updateFeed called - redirecting to database generation');
+    
+    // For backward compatibility, we'll just trigger a database regeneration
+    // You might want to get the group ID from somewhere appropriate
+    if (messageGroup.groupId) {
+      await this.generateFromDatabase(messageGroup.groupId, { limit: 50 });
     }
   }
 

@@ -150,8 +150,8 @@ module.exports = (sequelize, DataTypes) => {
   Message.associate = function(models) {
     Message.belongsTo(models.Group, { foreignKey: 'group_id' });
     Message.belongsTo(models.Author, { foreignKey: 'author_id' });
-    Message.hasOne(models.Media, { foreignKey: 'message_id' });
-    Message.hasMany(models.Link, { foreignKey: 'message_id' });
+    Message.hasOne(models.Media, { foreignKey: 'message_id', as: 'Media' }); 
+    Message.hasMany(models.Link, { foreignKey: 'message_id', as: 'Links' });
     Message.hasMany(models.Mention, { foreignKey: 'message_id' });
     Message.hasMany(models.Reaction, { foreignKey: 'message_id' });
   };

@@ -3,7 +3,7 @@ const moment = require('moment');
 const fs = require('fs-extra');
 const path = require('path');
 const FileUtils = require('../utils/fileUtils');
-
+const DatabaseService = require('../services/DatabaseService');
 const router = express.Router();
 
 function createApiRoutes(whatsappManager) {
@@ -168,9 +168,49 @@ function createApiRoutes(whatsappManager) {
   });
 
   // Enhanced RSS web view endpoint with XML button
-  router.get('/rss-view', (req, res) => {
+router.get('/rss-view', async (req, res) => {
+  try {
+    // Check if we have a selected group
+    if (!whatsappManager.selectedGroup) {
+      return res.status(404).send(generateEmptyFeedHTML());
+    }
+
+    // Get message groups from database
+    const messageGroups = await DatabaseService.getMessageGroupsForRSS(
+      whatsappManager.selectedGroup.id,
+      {
+        limit: 50,
+        authorId: whatsappManager.selectedUser
+      }
+    );
+
+    console.log(`Found ${messageGroups.length} message groups from database`);
+
+    // Convert database format to expected format for the view
+    const messages = messageGroups.map(group => ({
+      id: group.id,
+      author: group.Author?.push_name || group.author_id,
+      timestamp: new Date(group.start_date).getTime() / 1000,
+      messages: group.messages || [],
+      type: 'group',
+      messageCount: group.message_count,
+      mediaCount: group.media_count,
+      linkCount: group.link_count,
+      duration: group.duration
+    }));
+
+    const html = generateRSSWebView(messages, whatsappManager);
+    
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+    
+  } catch (error) {
+    console.error('Error generating RSS web view:', error);
+    console.error('Error stack:', error.stack);
+    
+    // Fallback to JSON file if database fails
     try {
-      // Read the RSS feed file
+      console.log('Falling back to JSON file...');
       const rssPath = path.join(__dirname, '../rss/feed.xml');
       const messagesPath = path.join(__dirname, '../rss/messages.json');
       
@@ -179,51 +219,159 @@ function createApiRoutes(whatsappManager) {
       }
 
       const rawMessages = JSON.parse(fs.readFileSync(messagesPath, 'utf8'));
-      console.log('Raw messages structure:', JSON.stringify(rawMessages, null, 2));
-      
-      // Convert messages to the expected format
       const messages = convertToExpectedFormat(rawMessages);
-      console.log('Converted messages count:', messages.length);
       
       const html = generateRSSWebView(messages, whatsappManager);
-      
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(html);
       
-    } catch (error) {
-      console.error('Error generating RSS web view:', error);
-      console.error('Error stack:', error.stack);
+    } catch (fallbackError) {
       res.status(500).send(`<h1>Error loading RSS feed</h1><p>${error.message}</p><pre>${error.stack}</pre>`);
     }
-  });
+  }
+});
 
   // Individual message view
-  router.get('/message/:messageId', (req, res) => {
-    try {
-      const { messageId } = req.params;
-      const messagesPath = path.join(__dirname, '../rss/messages.json');
+router.get('/message/:messageId', async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    
+    // First try to get from database
+    if (whatsappManager.selectedGroup) {
+      const messageGroups = await DatabaseService.getMessageGroupsForRSS(
+        whatsappManager.selectedGroup.id,
+        { limit: 100 }
+      );
       
-      if (!fs.existsSync(messagesPath)) {
-        return res.status(404).send('<h1>Messages not found</h1>');
+      const messageGroup = messageGroups.find(group => group.id === messageId);
+      
+      if (messageGroup) {
+        // Convert to expected format
+        const formattedGroup = {
+          id: messageGroup.id,
+          author: messageGroup.Author?.push_name || messageGroup.author_id,
+          timestamp: new Date(messageGroup.start_date).getTime() / 1000,
+          messages: messageGroup.messages || []
+        };
+        
+        const html = generateSingleMessageView(formattedGroup);
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        return res.send(html);
       }
-
-      const messages = JSON.parse(fs.readFileSync(messagesPath, 'utf8'));
-      const messageGroup = messages.find(group => group.id === messageId);
-      
-      if (!messageGroup) {
-        return res.status(404).send('<h1>Message not found</h1>');
-      }
-
-      const html = generateSingleMessageView(messageGroup);
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(html);
-      
-    } catch (error) {
-      console.error('Error loading message:', error);
-      res.status(500).send(`<h1>Error loading message</h1><p>${error.message}</p>`);
     }
-  });
+    
+    // Fallback to JSON file
+    const messagesPath = path.join(__dirname, '../rss/messages.json');
+    
+    if (!fs.existsSync(messagesPath)) {
+      return res.status(404).send('<h1>Messages not found</h1>');
+    }
 
+    const messages = JSON.parse(fs.readFileSync(messagesPath, 'utf8'));
+    const messageGroup = messages.find(group => group.id === messageId);
+    
+    if (!messageGroup) {
+      return res.status(404).send('<h1>Message not found</h1>');
+    }
+
+    const html = generateSingleMessageView(messageGroup);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+    
+  } catch (error) {
+    console.error('Error loading message:', error);
+    res.status(500).send(`<h1>Error loading message</h1><p>${error.message}</p>`);
+  }
+});
+  // Add this to your routes/api.js file
+
+// Regenerate RSS feed from database
+// Add a new route to trigger RSS regeneration with better options:
+router.post('/regenerate-rss', async (req, res) => {
+  try {
+    const { limit = 50, startDate, endDate, forceRegenerate = false } = req.body;
+    
+    if (!whatsappManager.selectedGroup) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'No group selected. Please select a group first.' 
+      });
+    }
+    
+    // If forceRegenerate is true, regenerate from database
+    if (forceRegenerate || whatsappManager.rssManager) {
+      await whatsappManager.rssManager.generateFromDatabase(
+        whatsappManager.selectedGroup.id,
+        {
+          limit,
+          authorId: whatsappManager.selectedUser,
+          startDate,
+          endDate
+        }
+      );
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'RSS feed regenerated from database',
+      feedUrl: '/rss/feed.xml',
+      group: whatsappManager.selectedGroup.name,
+      messageCount: limit
+    });
+  } catch (error) {
+    console.error('Error regenerating RSS:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// Get RSS generation status
+router.get('/rss-status', async (req, res) => {
+  try {
+    const fs = require('fs-extra');
+    const path = require('path');
+    
+    const feedPath = path.join(__dirname, '../rss/feed.xml');
+    const feedExists = fs.existsSync(feedPath);
+    
+    let feedInfo = null;
+    if (feedExists) {
+      const stats = fs.statSync(feedPath);
+      feedInfo = {
+        exists: true,
+        size: stats.size,
+        lastModified: stats.mtime,
+        path: '/rss/feed.xml'
+      };
+    }
+    
+    // Get statistics from database if group is selected
+    let dbStats = null;
+    if (whatsappManager.selectedGroup) {
+      dbStats = await DatabaseService.getGroupStatistics(
+        whatsappManager.selectedGroup.id
+      );
+    }
+    
+    res.json({
+      success: true,
+      feed: feedInfo,
+      database: {
+        connected: true,
+        statistics: dbStats
+      },
+      selectedGroup: whatsappManager.selectedGroup?.name || null
+    });
+  } catch (error) {
+    console.error('Error getting RSS status:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
   // Media info endpoint
   router.get('/media-info/:filename', (req, res) => {
     try {
@@ -292,6 +440,104 @@ function createApiRoutes(whatsappManager) {
   return router;
 }
 
+// Add this debug endpoint to your api.js to check database contents:
+
+router.get('/debug-database', async (req, res) => {
+  try {
+    if (!whatsappManager.selectedGroup) {
+      return res.json({ 
+        error: 'No group selected',
+        suggestion: 'Select a group first'
+      });
+    }
+
+    const groupId = whatsappManager.selectedGroup.id;
+
+    // Get counts
+    const messageCount = await Message.count({ where: { group_id: groupId } });
+    const messageGroupCount = await MessageGroup.count({ where: { group_id: groupId } });
+    const mediaCount = await Media.count({
+      include: [{
+        model: Message,
+        where: { group_id: groupId },
+        attributes: []
+      }]
+    });
+
+    // Get sample messages
+    const sampleMessages = await Message.findAll({
+      where: { group_id: groupId },
+      limit: 5,
+      include: [
+        { model: Media, required: false },
+        { model: Author }
+      ],
+      order: [['timestamp', 'DESC']]
+    });
+
+    // Get sample message groups
+    const sampleGroups = await MessageGroup.findAll({
+      where: { group_id: groupId },
+      limit: 5,
+      include: [{ model: Author }],
+      order: [['start_timestamp', 'DESC']]
+    });
+
+    // Check for orphaned messages (messages without groups)
+    const orphanedMessages = await sequelize.query(
+      `SELECT COUNT(*) as count FROM messages m 
+       WHERE m.group_id = :groupId 
+       AND NOT EXISTS (
+         SELECT 1 FROM message_groups mg 
+         WHERE mg.group_id = m.group_id 
+         AND mg.author_id = m.author_id
+         AND m.timestamp BETWEEN mg.start_timestamp AND mg.end_timestamp
+       )`,
+      {
+        replacements: { groupId },
+        type: sequelize.QueryTypes.SELECT
+      }
+    );
+
+    res.json({
+      database: {
+        groupId,
+        counts: {
+          messages: messageCount,
+          messageGroups: messageGroupCount,
+          media: mediaCount,
+          orphanedMessages: orphanedMessages[0].count
+        },
+        sampleMessages: sampleMessages.map(m => ({
+          id: m.id,
+          author: m.Author?.push_name || m.author_id,
+          timestamp: m.timestamp,
+          date: m.message_date,
+          body: m.body?.substring(0, 50) + '...',
+          hasMedia: m.has_media,
+          media: m.Media ? {
+            path: m.Media.file_path,
+            type: m.Media.media_type
+          } : null
+        })),
+        sampleGroups: sampleGroups.map(g => ({
+          id: g.id,
+          author: g.Author?.push_name || g.author_id,
+          startTime: new Date(g.start_timestamp * 1000),
+          endTime: new Date(g.end_timestamp * 1000),
+          messageCount: g.message_count,
+          duration: g.duration
+        }))
+      }
+    });
+  } catch (error) {
+    console.error('Error debugging database:', error);
+    res.status(500).json({ 
+      error: error.message,
+      stack: error.stack 
+    });
+  }
+});
 // Helper function to generate message card HTML
 function generateMessageCard(group) {
   const authorInitials = group.author ? group.author.charAt(0).toUpperCase() : 'U';
@@ -336,10 +582,13 @@ function generateMessageContent(message) {
     }
   }
   
-  // Handle media
-  if (message.hasMedia && message.mediaPath) {
-    const mediaExt = path.extname(message.mediaPath).toLowerCase();
-    const mediaUrl = `/media/${path.basename(message.mediaPath)}`;
+  // Handle media - check both old format (hasMedia) and new format (has_media)
+  const hasMedia = message.hasMedia || message.has_media;
+  const mediaPath = message.mediaPath || (message.Media && message.Media.file_path);
+  
+  if (hasMedia && mediaPath) {
+    const mediaExt = path.extname(mediaPath).toLowerCase();
+    const mediaUrl = `/media/${path.basename(mediaPath)}`;
     
     content += `<div class="media-container">`;
     
@@ -357,7 +606,7 @@ function generateMessageContent(message) {
             <div class="document-icon">📄</div>
             <div>
               <a href="${mediaUrl}" target="_blank" class="document-link">
-                ${path.basename(message.mediaPath)}
+                ${path.basename(mediaPath)}
               </a>
               <div class="document-type">${mediaExt.substring(1).toUpperCase()} file</div>
             </div>

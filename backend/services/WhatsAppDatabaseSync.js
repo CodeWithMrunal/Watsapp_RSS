@@ -12,91 +12,119 @@ class WhatsAppDatabaseSync {
     const originalFetchHistory = whatsAppManager.fetchHistory.bind(whatsAppManager);
     const originalSelectGroup = whatsAppManager.selectGroup.bind(whatsAppManager);
 
-    // Override handleIncomingMessage to save to database
-    whatsAppManager.handleIncomingMessage = async function(message) {
-      console.log('📥 Processing incoming message with database sync...');
+// Update the handleIncomingMessage override in WhatsAppDatabaseSync.js:
+
+whatsAppManager.handleIncomingMessage = async function(message) {
+  console.log('📥 Processing incoming message with database sync...');
+  
+  // Call original method first
+  await originalHandleIncomingMessage(message);
+  
+  // Save to database if we have a selected group
+  if (this.selectedGroup && message.from.includes('@g.us')) {
+    try {
+      // Find the message in history (it was just added)
+      const messageData = this.messageHistory[this.messageHistory.length - 1];
       
-      // Call original method first
-      await originalHandleIncomingMessage(message);
-      
-      // Save to database if we have a selected group
-      if (this.selectedGroup && message.from.includes('@g.us')) {
-        try {
-          // Find the message in history (it was just added)
-          const messageData = this.messageHistory[this.messageHistory.length - 1];
-          
-          // Save to database
-          await DatabaseService.saveMessage(messageData, this.selectedGroup.id);
-          console.log('💾 Message saved to database');
-        } catch (error) {
-          // Only log error if it's not a duplicate key error
-    if (error.name !== 'SequelizeUniqueConstraintError') {
-      console.error('❌ Error saving message to database:', error);
-    } else {
-      console.log('ℹ️ Message already exists in database, skipping...');
-    }
+      // Ensure media path is properly set
+      if (messageData.hasMedia && messageData.mediaPath && typeof messageData.mediaPath === 'string') {
+        console.log(`📸 Message has media at: ${messageData.mediaPath}`);
+        // Ensure mediaMetadata is set if not already
+        if (!messageData.mediaMetadata) {
+          messageData.mediaMetadata = {
+            path: messageData.mediaPath,
+            filename: path.basename(messageData.mediaPath),
+            savedAt: new Date().toISOString()
+          };
         }
       }
-    };
+      
+      // Save to database
+      await DatabaseService.saveMessage(messageData, this.selectedGroup.id);
+      console.log('💾 Message saved to database');
+      
+      // Regenerate RSS feed from database
+      await this.rssManager.generateFromDatabase(this.selectedGroup.id, {
+        limit: 50,
+        authorId: this.selectedUser
+      });
+      
+    } catch (error) {
+      if (error.name !== 'SequelizeUniqueConstraintError') {
+        console.error('❌ Error saving message to database:', error);
+      } else {
+        console.log('ℹ️ Message already exists in database, skipping...');
+      }
+    }
+  }
+};
 
     // Override fetchHistory to sync with database
-    whatsAppManager.fetchHistory = async function(limit = 50) {
-      console.log('📋 Fetching history with database sync...');
-      
-      // First ensure group exists in database
-      if (this.selectedGroup) {
-        await DatabaseService.upsertGroup({
-          id: this.selectedGroup.id,
-          name: this.selectedGroup.name,
-          participantCount: this.selectedGroup.participants?.length || 0
-        });
-      }
-      
-      // Call original method
-      const result = await originalFetchHistory(limit);
-      
-      // Sync all messages to database
-      if (this.messageHistory.length > 0 && this.selectedGroup) {
-        console.log(`💾 Syncing ${this.messageHistory.length} messages to database...`);
-        
-        const syncResult = await DatabaseService.batchSaveMessages(
-          this.messageHistory,
-          this.selectedGroup.id
-        );
-        
-        console.log(`✅ Database sync complete: ${syncResult.successful} messages saved`);
-        
-        // Save message groups
-        const grouped = result;
-for (const group of grouped) {
-  try {
-    // Ensure we have the required timestamps
-    if (group.messages && group.messages.length > 0) {
-      const enrichedGroup = {
-        ...group,
-        groupId: this.selectedGroup.id,
-        startTimestamp: group.messages[0].timestamp,
-        endTimestamp: group.messages[group.messages.length - 1].timestamp,
-        messageCount: group.messages.length
-      };
-      await DatabaseService.saveMessageGroup(enrichedGroup);
+  whatsAppManager.fetchHistory = async function(limit = 50) {
+    console.log('📋 Fetching history with database sync...');
+    
+    // First ensure group exists in database
+    if (this.selectedGroup) {
+      await DatabaseService.upsertGroup({
+        id: this.selectedGroup.id,
+        name: this.selectedGroup.name,
+        participantCount: this.selectedGroup.participants?.length || 0
+      });
     }
-  } catch (error) {
-    console.error('Error saving message group:', error);
-  }
-}
-        
-        // Generate and save conversation summary
+    
+    // Call original method
+    const result = await originalFetchHistory(limit);
+    
+    // Sync all messages to database
+    if (this.messageHistory.length > 0 && this.selectedGroup) {
+      console.log(`💾 Syncing ${this.messageHistory.length} messages to database...`);
+      
+      const syncResult = await DatabaseService.batchSaveMessages(
+        this.messageHistory,
+        this.selectedGroup.id
+      );
+      
+      console.log(`✅ Database sync complete: ${syncResult.successful} messages saved`);
+      
+      // Save message groups
+      const grouped = result;
+      for (const group of grouped) {
         try {
-          const summary = require('../utils/messageUtils').generateConversationSummary(this.messageHistory);
-          await DatabaseService.saveConversationSummary(summary, this.selectedGroup.id);
+          if (group.messages && group.messages.length > 0) {
+            const enrichedGroup = {
+              ...group,
+              groupId: this.selectedGroup.id,
+              startTimestamp: group.messages[0].timestamp,
+              endTimestamp: group.messages[group.messages.length - 1].timestamp,
+              messageCount: group.messages.length
+            };
+            await DatabaseService.saveMessageGroup(enrichedGroup);
+          }
         } catch (error) {
-          console.error('Error saving conversation summary:', error);
+          console.error('Error saving message group:', error);
         }
       }
       
-      return result;
-    };
+      // Generate conversation summary
+      try {
+        const summary = require('../utils/messageUtils').generateConversationSummary(this.messageHistory);
+        await DatabaseService.saveConversationSummary(summary, this.selectedGroup.id);
+      } catch (error) {
+        console.error('Error saving conversation summary:', error);
+      }
+      
+      // Generate RSS feed from database
+      console.log('📰 Generating RSS feed from database...');
+      await this.rssManager.generateFromDatabase(this.selectedGroup.id, {
+        limit: 50,
+        authorId: this.selectedUser
+      });
+    }
+    
+    return result;
+  };
+
+  
 
     // Override selectGroup to ensure it exists in database
     whatsAppManager.selectGroup = async function(groupId) {
@@ -131,9 +159,26 @@ for (const group of grouped) {
       
       return await DatabaseService.getGroupStatistics(this.selectedGroup.id, startDate, endDate);
     };
+  // Add method to manually regenerate RSS from database
+  whatsAppManager.regenerateRSSFromDatabase = async function(options = {}) {
+    if (!this.selectedGroup) {
+      throw new Error('No group selected');
+    }
+    
+    console.log('🔄 Manually regenerating RSS feed from database...');
+    
+    await this.rssManager.generateFromDatabase(this.selectedGroup.id, {
+      limit: options.limit || 50,
+      authorId: this.selectedUser || options.authorId,
+      startDate: options.startDate,
+      endDate: options.endDate
+    });
+    
+    console.log('✅ RSS feed regenerated from database');
+  };
 
-    console.log('✅ WhatsApp Manager enhanced with database sync');
-  }
+  console.log('✅ WhatsApp Manager enhanced with database sync and RSS generation');
+}
 
   /**
    * Migrate existing JSON data to database

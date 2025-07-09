@@ -431,3 +431,6 @@ open http://localhost  ### macOS
 
 RESET DATABASE:
 npx sequelize-cli db:migrate:undo:all
+
+create Databases:
+npx sequelize-cli db:migrate

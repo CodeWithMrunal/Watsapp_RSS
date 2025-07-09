@@ -159,7 +159,8 @@ class WhatsAppMonitorServer {
     this.app.get('/', (req, res) => {
       res.redirect('/api/rss-view');
     });
-    
+
+
     // Health check endpoint with enhanced information
     this.app.get('/health', async (req, res) => {
       const status = this.whatsappManager.getStatus();
