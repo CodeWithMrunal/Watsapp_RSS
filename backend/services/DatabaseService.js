@@ -83,36 +83,40 @@ class DatabaseService {
         name: messageData.author 
       });
 
-      // Create the message
-      const message = await Message.create({
-        id: messageData.id,
-        message_id: messageData.messageId || messageData.id,
-        group_id: groupId,
-        author_id: author.id,
-        timestamp: messageData.timestamp,
-        message_date: new Date(messageData.timestamp * 1000),
-        type: messageData.type,
-        body: messageData.body,
-        original_body: messageData.originalBody,
-        caption: messageData.caption,
-        has_media: messageData.hasMedia,
-        is_forwarded: messageData.isForwarded,
-        is_starred: messageData.isStarred,
-        is_deleted: messageData.isDeleted,
-        is_ephemeral: messageData.isEphemeral,
-        is_status: messageData.isStatus,
-        is_broadcast: messageData.isBroadcast,
-        from_jid: messageData.from,
-        to_jid: messageData.to,
-        word_count: messageData.wordCount,
-        char_count: messageData.charCount,
-        detected_language: messageData.detectedLanguage,
-        device_type: messageData.deviceType,
-        quoted_message_id: messageData.quotedMessage?.id,
-        quoted_message_data: messageData.quotedMessage,
-        raw_data: messageData._raw
-      }, { transaction });
-
+      // Create the message - use upsert instead of create
+const [message, created] = await Message.upsert({
+  id: messageData.id,
+  message_id: messageData.messageId || messageData.id,
+  group_id: groupId,
+  author_id: author.id,
+  timestamp: messageData.timestamp,
+  message_date: new Date(messageData.timestamp * 1000),
+  type: messageData.type,
+  body: messageData.body,
+  original_body: messageData.originalBody,
+  caption: messageData.caption,
+  has_media: messageData.hasMedia,
+  is_forwarded: messageData.isForwarded,
+  is_starred: messageData.isStarred,
+  is_deleted: messageData.isDeleted,
+  is_ephemeral: messageData.isEphemeral,
+  is_status: messageData.isStatus,
+  is_broadcast: messageData.isBroadcast,
+  from_jid: messageData.from,
+  to_jid: messageData.to,
+  word_count: messageData.wordCount,
+  char_count: messageData.charCount,
+  detected_language: messageData.detectedLanguage,
+  device_type: messageData.deviceType,
+  quoted_message_id: messageData.quotedMessage?.id,
+  quoted_message_data: messageData.quotedMessage,
+  raw_data: messageData._raw
+}, { 
+  transaction,
+  returning: true 
+});
+// Only process related data if this is a new message
+if (created) {
       // Save media if exists
       if (messageData.hasMedia && messageData.mediaMetadata) {
         await Media.create({
@@ -151,7 +155,7 @@ class DatabaseService {
         
         await Promise.all(linkPromises);
       }
-
+    
       // Save mentions
       if (messageData.mentions && messageData.mentions.length > 0) {
         const mentionPromises = messageData.mentions.map((mention, index) => {
@@ -178,7 +182,7 @@ class DatabaseService {
         
         await Promise.all(reactionPromises);
       }
-
+    }
       // Update author counters
       const updateData = {
         message_count: sequelize.literal('message_count + 1')
@@ -213,34 +217,36 @@ class DatabaseService {
   /**
    * Save a message group
    */
-  static async saveMessageGroup(groupData) {
+    static async saveMessageGroup(groupData) {
     try {
-      const messageGroup = await MessageGroup.create({
+        // Map the field names correctly
+        const messageGroup = await MessageGroup.create({
         id: groupData.id,
         group_id: groupData.groupId,
         author_id: groupData.author,
-        start_timestamp: groupData.startTimestamp,
-        end_timestamp: groupData.endTimestamp,
-        start_date: new Date(groupData.startTimestamp * 1000),
-        end_date: new Date(groupData.endTimestamp * 1000),
-        duration: groupData.duration,
-        message_count: groupData.messageCount,
-        media_count: groupData.statistics?.mediaMessages || 0,
-        text_count: groupData.statistics?.textMessages || 0,
+        // Use 'timestamp' field from the first message if start/end timestamps aren't available
+        start_timestamp: groupData.startTimestamp || groupData.timestamp || (groupData.messages && groupData.messages[0]?.timestamp),
+        end_timestamp: groupData.endTimestamp || groupData.timestamp || (groupData.messages && groupData.messages[groupData.messages.length - 1]?.timestamp),
+        start_date: groupData.startDate || groupData.startTime || new Date((groupData.startTimestamp || groupData.timestamp) * 1000),
+        end_date: groupData.endDate || groupData.endTime || new Date((groupData.endTimestamp || groupData.timestamp) * 1000),
+        duration: groupData.duration || 0,
+        message_count: groupData.messageCount || groupData.messages?.length || 0,
+        media_count: groupData.statistics?.mediaCount || groupData.statistics?.mediaMessages || 0,
+        text_count: groupData.statistics?.textCount || groupData.statistics?.textMessages || 0,
         link_count: groupData.statistics?.linkCount || 0,
         mention_count: groupData.statistics?.mentionCount || 0,
         total_media_size: groupData.totalMediaSize || 0,
         average_message_length: groupData.averageMessageLength || 0,
         statistics: groupData.statistics || {}
-      });
+        });
 
-      console.log(`✅ Saved message group ${messageGroup.id}`);
-      return messageGroup;
+        console.log(`✅ Saved message group ${messageGroup.id}`);
+        return messageGroup;
     } catch (error) {
-      console.error('Error saving message group:', error);
-      throw error;
+        console.error('Error saving message group:', error);
+        throw error;
     }
-  }
+    }
 
   /**
    * Save conversation summary
@@ -287,11 +293,17 @@ class DatabaseService {
         await this.saveMessage(messageData, groupId);
         results.successful++;
       } catch (error) {
-        results.failed++;
-        results.errors.push({
-          messageId: messageData.id,
-          error: error.message
-        });
+        // Don't count duplicates as failures
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      console.log(`ℹ️ Message ${messageData.id} already exists, skipping...`);
+      results.successful++; // Count as successful since it's already there
+    } else {
+      results.failed++;
+      results.errors.push({
+        messageId: messageData.id,
+        error: error.message
+      });
+    }
       }
     }
 

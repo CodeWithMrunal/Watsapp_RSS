@@ -427,3 +427,7 @@ docker-compose -f docker-compose.prod.yml up -d
 ### 5. Access the application
 open http://localhost  ### macOS
 ### or visit http://localhost in any browser
+
+
+RESET DATABASE:
+npx sequelize-cli db:migrate:undo:all

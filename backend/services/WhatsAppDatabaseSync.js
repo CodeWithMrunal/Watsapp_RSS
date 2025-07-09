@@ -29,7 +29,12 @@ class WhatsAppDatabaseSync {
           await DatabaseService.saveMessage(messageData, this.selectedGroup.id);
           console.log('💾 Message saved to database');
         } catch (error) {
-          console.error('❌ Error saving message to database:', error);
+          // Only log error if it's not a duplicate key error
+    if (error.name !== 'SequelizeUniqueConstraintError') {
+      console.error('❌ Error saving message to database:', error);
+    } else {
+      console.log('ℹ️ Message already exists in database, skipping...');
+    }
         }
       }
     };
@@ -63,16 +68,23 @@ class WhatsAppDatabaseSync {
         
         // Save message groups
         const grouped = result;
-        for (const group of grouped) {
-          try {
-            await DatabaseService.saveMessageGroup({
-              ...group,
-              groupId: this.selectedGroup.id
-            });
-          } catch (error) {
-            console.error('Error saving message group:', error);
-          }
-        }
+for (const group of grouped) {
+  try {
+    // Ensure we have the required timestamps
+    if (group.messages && group.messages.length > 0) {
+      const enrichedGroup = {
+        ...group,
+        groupId: this.selectedGroup.id,
+        startTimestamp: group.messages[0].timestamp,
+        endTimestamp: group.messages[group.messages.length - 1].timestamp,
+        messageCount: group.messages.length
+      };
+      await DatabaseService.saveMessageGroup(enrichedGroup);
+    }
+  } catch (error) {
+    console.error('Error saving message group:', error);
+  }
+}
         
         // Generate and save conversation summary
         try {
