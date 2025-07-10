@@ -629,12 +629,12 @@ class RSSManager {
   async saveFeed() {
     try {
       fs.ensureDirSync('./rss');
-      
+      this.rssFeed.pubDate = new Date().toISOString();
       // Save RSS feed with proper formatting
       const rssXml = this.rssFeed.xml({ indent: true });
       fs.writeFileSync('./rss/feed.xml', rssXml);
       
-      console.log('✅ RSS feed saved to ./rss/feed.xml');
+      console.log(`✅ RSS feed saved to ./rss/feed.xml at ${new Date().toISOString()}`);
     } catch (error) {
       console.error('❌ Error saving RSS feed:', error);
       throw error;

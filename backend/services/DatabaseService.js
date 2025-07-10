@@ -539,7 +539,7 @@ static async getMessageGroupsForRSS(groupId, options = {}) {
             attributes: ['url', 'domain', 'link_type']
           }
         ],
-        order: [['timestamp', 'ASC']]
+        order: [['timestamp', 'DESC']]
       });
 
       // Convert to plain object and add messages

@@ -1,3 +1,5 @@
+const { defaultValueSchemable } = require("sequelize/lib/utils");
+
 module.exports = (sequelize, DataTypes) => {
   const Link = sequelize.define('Link', {
     id: {
@@ -28,6 +30,10 @@ module.exports = (sequelize, DataTypes) => {
     position: {
       type: DataTypes.INTEGER,
       defaultValue: 0
+    },
+    processed:{
+        type:DataTypes.INTEGER,
+        defaultValue: 0
     }
   }, {
     tableName: 'links',

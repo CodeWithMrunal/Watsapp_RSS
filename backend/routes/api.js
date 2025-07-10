@@ -170,6 +170,9 @@ function createApiRoutes(whatsappManager) {
   // Enhanced RSS web view endpoint with XML button
 router.get('/rss-view', async (req, res) => {
   try {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
     // Check if we have a selected group
     if (!whatsappManager.selectedGroup) {
       return res.status(404).send(generateEmptyFeedHTML());
