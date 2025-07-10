@@ -1,7 +1,7 @@
 // backend/services/WhatsAppDatabaseSync.js
 const DatabaseService = require('./DatabaseService');
 const { sequelize } = require('../models');
-
+const path = require('path');
 class WhatsAppDatabaseSync {
   /**
    * Update WhatsAppManager to save messages to database
@@ -43,9 +43,33 @@ whatsAppManager.handleIncomingMessage = async function(message) {
       await DatabaseService.saveMessage(messageData, this.selectedGroup.id);
       console.log('💾 Message saved to database');
       
+      // Create a message group for this message
+      const messageGroup = {
+        id: `${this.selectedGroup.id}_${messageData.author}_${messageData.timestamp}`,
+        groupId: this.selectedGroup.id,
+        author: messageData.author,
+        messages: [messageData],
+        timestamp: messageData.timestamp,
+        startTimestamp: messageData.timestamp,
+        endTimestamp: messageData.timestamp,
+        messageCount: 1,
+        statistics: {
+          mediaMessages: messageData.hasMedia ? 1 : 0,
+          textMessages: messageData.hasMedia ? 0 : 1,
+          mediaCount: messageData.hasMedia ? 1 : 0,
+          textCount: messageData.hasMedia ? 0 : 1,
+          linkCount: messageData.links ? messageData.links.length : 0,
+          mentionCount: messageData.mentions ? messageData.mentions.length : 0
+        }
+      };
+      
+      // Save the message group
+      await DatabaseService.saveMessageGroup(messageGroup);
+      console.log('📦 Message group created for real-time message');
+      
       // Regenerate RSS feed from database
       await this.rssManager.generateFromDatabase(this.selectedGroup.id, {
-        limit: 50,
+        limit: 100,  // Increased limit
         authorId: this.selectedUser
       });
       
