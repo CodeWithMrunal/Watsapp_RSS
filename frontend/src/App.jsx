@@ -264,6 +264,17 @@ function App() {
               )}
             </Alert>
           )}
+          {selectedGroup && (
+  <div className="text-center mb-4">
+    <Button
+      variant="success"
+      onClick={() => window.open('http://localhost:3001/api/rss-view', '_blank')}
+    >
+      <i className="fas fa-rss me-2"></i>
+      View RSS Feed
+    </Button>
+  </div>
+)}
 
           {renderCurrentStep()}
         </Col>
