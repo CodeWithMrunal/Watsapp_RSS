@@ -3,6 +3,8 @@ const { Server } = require('socket.io');
 const http = require('http');
 const cors = require('cors');
 const path = require('path');
+const createMultiGroupRoutes = require('./routes/multiGroupRoutes');
+
 
 // Import configuration and utilities
 const config = require('./config');
@@ -145,23 +147,53 @@ class WhatsAppMonitorServer {
     // API routes
     this.app.use('/api', createApiRoutes(this.whatsappManager));
     
-    // Enhanced RSS feed route - redirect to web view by default
+    // NEW: Multi-group API routes
+    this.app.use('/api/multi-group', createMultiGroupRoutes(this.whatsappManager));
+    
+    // Enhanced RSS feed routes for multi-group
     this.app.get('/rss', (req, res) => {
       res.redirect('/api/rss-view');
     });
     
-    // Direct access to XML feed
+    // Direct access to XML feeds
     this.app.get('/rss/feed.xml', (req, res) => {
       res.sendFile(path.join(__dirname, 'rss', 'feed.xml'));
     });
     
-    // Main RSS web view route (also accessible directly)
-    this.app.get('/', (req, res) => {
-      res.redirect('/api/rss-view');
+    // NEW: Group-specific RSS feeds
+    this.app.get('/rss/groups/:groupId/feed.xml', (req, res) => {
+      const { groupId } = req.params;
+      const feedPath = path.join(__dirname, 'rss', 'groups', groupId, 'feed.xml');
+      
+      if (fs.existsSync(feedPath)) {
+        res.sendFile(feedPath);
+      } else {
+        res.status(404).json({ error: 'RSS feed not found for this group' });
+      }
     });
-
-
-    // Health check endpoint with enhanced information
+    
+    // NEW: Combined RSS feed
+    this.app.get('/rss/combined/feed.xml', (req, res) => {
+      const feedPath = path.join(__dirname, 'rss', 'combined', 'feed.xml');
+      
+      if (fs.existsSync(feedPath)) {
+        res.sendFile(feedPath);
+      } else {
+        res.status(404).json({ error: 'Combined RSS feed not found' });
+      }
+    });
+    
+    // NEW: RSS feeds listing endpoint
+    this.app.get('/api/rss-feeds', (req, res) => {
+      const feeds = this.rssManager.getAvailableFeeds();
+      res.json({
+        success: true,
+        feeds,
+        count: feeds.length
+      });
+    });
+    
+    // Enhanced health check endpoint with multi-group info
     this.app.get('/health', async (req, res) => {
       const status = this.whatsappManager.getStatus();
       const uptime = process.uptime();
@@ -193,48 +225,74 @@ class WhatsAppMonitorServer {
             authenticated: status.authenticated,
             ready: status.ready,
             selectedGroup: status.selectedGroup,
+            monitoredGroups: status.monitoredGroups || [],
             cachedGroups: status.cachedGroups,
             messageHistoryCount: status.messageHistoryCount,
-            statistics: status.statistics
+            statistics: status.statistics,
+            multiGroupStats: status.multiGroupStats || {}
           },
           database: databaseStatus,
-          rss: this.rssManager ? 'initialized' : 'not initialized',
+          rss: {
+            initialized: this.rssManager ? true : false,
+            availableFeeds: this.rssManager ? this.rssManager.getAvailableFeeds().length : 0
+          },
           socket: this.socketManager ? 'active' : 'inactive'
         },
         endpoints: {
           rssWebView: `/api/rss-view`,
           rssXml: `/rss/feed.xml`,
+          groupRssFeeds: `/rss/groups/{groupId}/feed.xml`,
+          combinedRssFeed: `/rss/combined/feed.xml`,
           mediaFiles: `/media/`,
           api: `/api/`,
+          multiGroupApi: `/api/multi-group/`,
           health: `/health`
         }
       });
     });
-    
-    // API documentation endpoint
+
+    // Update API documentation endpoint
     this.app.get('/api-docs', (req, res) => {
       res.json({
         name: 'WhatsApp Monitor API',
-        version: '1.0.0',
-        description: 'API for monitoring WhatsApp messages with RSS feed generation',
+        version: '2.0.0',
+        description: 'API for monitoring WhatsApp messages with RSS feed generation - Now with multi-group support!',
         endpoints: {
-          'GET /health': 'Server health and status information',
-          'GET /api/status': 'WhatsApp client status',
-          'GET /api/groups': 'List available WhatsApp groups',
-          'POST /api/select-group': 'Select a group to monitor',
-          'GET /api/group-participants': 'Get participants of selected group',
-          'POST /api/select-user': 'Filter messages by specific user',
-          'POST /api/fetch-history': 'Fetch message history',
-          'GET /api/messages': 'Get current messages (with database support)',
-          'GET /api/statistics': 'Get group statistics from database',
-          'POST /api/initialize': 'Initialize WhatsApp client',
-          'POST /api/logout': 'Logout and clear session',
-          'POST /api/backup-messages': 'Backup messages to file',
-          'GET /api/rss-view': 'Enhanced web view of RSS feed',
-          'GET /api/message/:id': 'View individual message',
-          'GET /api/media-info/:filename': 'Get media file information',
-          'GET /rss/feed.xml': 'RSS XML feed',
-          'GET /media/:filename': 'Media file access'
+          core: {
+            'GET /health': 'Server health and status information',
+            'GET /api/status': 'WhatsApp client status',
+            'GET /api/groups': 'List available WhatsApp groups',
+            'POST /api/select-group': 'Select a group to monitor (legacy)',
+            'GET /api/group-participants': 'Get participants of selected group',
+            'POST /api/select-user': 'Filter messages by specific user',
+            'POST /api/fetch-history': 'Fetch message history',
+            'GET /api/messages': 'Get current messages (with database support)',
+            'GET /api/statistics': 'Get group statistics from database',
+            'POST /api/initialize': 'Initialize WhatsApp client',
+            'POST /api/logout': 'Logout and clear session',
+            'POST /api/backup-messages': 'Backup messages to file',
+            'GET /api/rss-view': 'Enhanced web view of RSS feed',
+            'GET /api/message/:id': 'View individual message',
+            'GET /api/media-info/:filename': 'Get media file information'
+          },
+          multiGroup: {
+            'GET /api/multi-group/monitored-groups': 'Get all monitored groups',
+            'POST /api/multi-group/add-group': 'Add a group to monitoring',
+            'POST /api/multi-group/remove-group': 'Remove a group from monitoring',
+            'POST /api/multi-group/fetch-group-history': 'Fetch history for a specific group',
+            'GET /api/multi-group/group-messages/:groupId': 'Get messages for a specific group',
+            'GET /api/multi-group/multi-group-statistics': 'Get statistics for all monitored groups',
+            'POST /api/multi-group/add-groups-batch': 'Add multiple groups at once',
+            'GET /api/multi-group/is-monitored/:groupId': 'Check if a group is monitored',
+            'POST /api/multi-group/generate-group-rss': 'Generate RSS feed for a group'
+          },
+          rss: {
+            'GET /rss/feed.xml': 'Main RSS XML feed',
+            'GET /rss/groups/:groupId/feed.xml': 'Group-specific RSS feed',
+            'GET /rss/combined/feed.xml': 'Combined RSS feed for all monitored groups',
+            'GET /api/rss-feeds': 'List all available RSS feeds',
+            'GET /media/:filename': 'Media file access'
+          }
         },
         websocket: {
           events: {
@@ -243,7 +301,9 @@ class WhatsAppMonitorServer {
             authenticated: 'WhatsApp client authenticated',
             ready: 'WhatsApp client ready',
             disconnected: 'WhatsApp client disconnected',
-            new_message: 'New message received',
+            new_message: 'New message received (now includes groupId)',
+            group_added: 'Group added to monitoring',
+            group_removed: 'Group removed from monitoring',
             status: 'Status update',
             loading_progress: 'Loading progress update'
           }
@@ -261,6 +321,14 @@ class WhatsAppMonitorServer {
             'MessageGroups',
             'ConversationSummaries'
           ]
+        },
+        features: {
+          multiGroupMonitoring: true,
+          perGroupRssFeeds: true,
+          combinedRssFeed: true,
+          realtimeUpdates: true,
+          mediaDownload: true,
+          databasePersistence: true
         }
       });
     });

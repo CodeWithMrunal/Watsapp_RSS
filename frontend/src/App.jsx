@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Container, Row, Col, Card, Alert, Button } from 'react-bootstrap';
+import { Container, Row, Col, Card, Alert, Button, ButtonGroup, Badge } from 'react-bootstrap';
 import io from 'socket.io-client';
 import axios from 'axios';
 import WhatsAppLogin from './components/WhatsAppLogin';
 import GroupSelection from './components/GroupSelection';
 import UserFilter from './components/UserFilter';
 import MessageDisplay from './components/MessageDisplay';
+import MultiGroupMonitor from './components/MultiGroupMonitor';
 import './App.css';
 
 const API_BASE = 'http://localhost:3001';
@@ -13,13 +14,14 @@ const API_BASE = 'http://localhost:3001';
 function App() {
   const [socket, setSocket] = useState(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isReady, setIsReady] = useState(false); // ADD THIS
+  const [isReady, setIsReady] = useState(false);
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [selectedUser, setSelectedUser] = useState(null);
   const [messages, setMessages] = useState([]);
   const [showGrouped, setShowGrouped] = useState(true);
   const [status, setStatus] = useState('disconnected');
   const [error, setError] = useState('');
+  const [monitorMode, setMonitorMode] = useState('single'); // 'single' or 'multi'
 
   useEffect(() => {
     // Initialize socket connection
@@ -36,13 +38,12 @@ function App() {
       console.log('WhatsApp disconnected:', reason);
       setStatus('disconnected');
       setIsAuthenticated(false);
-      setIsReady(false); // ADD THIS
+      setIsReady(false);
       setSelectedGroup(null);
       setSelectedUser(null);
       setMessages([]);
     });
 
-    // ADD: Listen for ready event
     newSocket.on('ready', () => {
       console.log('WhatsApp client is ready!');
       setIsReady(true);
@@ -54,33 +55,38 @@ function App() {
       setIsAuthenticated(true);
       setStatus('authenticated');
       setError('');
-      // Don't set ready here, wait for ready event
     });
 
     newSocket.on('auth_failure', (msg) => {
       setError(`Authentication failed: ${msg}`);
       setIsAuthenticated(false);
-      setIsReady(false); // ADD THIS
+      setIsReady(false);
     });
 
-    newSocket.on('new_message', (messageGroup) => {
-      setMessages(prev => [messageGroup, ...prev]);
+    newSocket.on('new_message', (data) => {
+      // Handle both single and multi-group message formats
+      if (data.messageGroup) {
+        // Multi-group format
+        if (!selectedGroup || data.groupId === selectedGroup.id) {
+          setMessages(prev => [data.messageGroup, ...prev]);
+        }
+      } else {
+        // Legacy single group format
+        setMessages(prev => [data, ...prev]);
+      }
     });
 
-    // UPDATE: Handle status with ready state
     newSocket.on('status', (statusData) => {
       setIsAuthenticated(statusData.authenticated);
-      setIsReady(statusData.ready || false); // ADD THIS
+      setIsReady(statusData.ready || false);
       if (statusData.selectedGroup) {
         setSelectedGroup({ name: statusData.selectedGroup });
       }
       setSelectedUser(statusData.selectedUser);
     });
 
-    // ADD: Handle loading progress
     newSocket.on('loading_progress', ({ percent, message }) => {
       console.log(`Loading: ${percent}% - ${message}`);
-      // You could show this in UI if needed
     });
 
     // Check initial status
@@ -95,7 +101,7 @@ function App() {
     try {
       const response = await axios.get(`${API_BASE}/api/status`);
       setIsAuthenticated(response.data.authenticated);
-      setIsReady(response.data.ready || false); // ADD THIS
+      setIsReady(response.data.ready || false);
       if (response.data.selectedGroup) {
         setSelectedGroup({ name: response.data.selectedGroup });
       }
@@ -109,6 +115,7 @@ function App() {
     setSelectedGroup(group);
     setMessages([]);
     setSelectedUser(null);
+    setMonitorMode('single');
   };
 
   const handleUserSelected = (user) => {
@@ -130,11 +137,11 @@ function App() {
     setShowGrouped(!showGrouped);
   };
 
-  // Go back functions
   const handleGoBackToGroups = () => {
     setSelectedGroup(null);
     setSelectedUser(null);
     setMessages([]);
+    setMonitorMode('single');
   };
 
   const handleGoBackToUserFilter = () => {
@@ -146,14 +153,14 @@ function App() {
     try {
       await axios.post(`${API_BASE}/api/logout`);
       
-      // Reset all state immediately
       setIsAuthenticated(false);
-      setIsReady(false); // ADD THIS
+      setIsReady(false);
       setSelectedGroup(null);
       setSelectedUser(null);
       setMessages([]);
       setStatus('disconnected');
       setError('');
+      setMonitorMode('single');
       
       console.log('✅ Logout successful, state reset');
       
@@ -161,14 +168,48 @@ function App() {
       console.error('Error logging out:', error);
       setError('Failed to logout properly');
       
-      // Force reset state even if logout call fails
       setIsAuthenticated(false);
-      setIsReady(false); // ADD THIS
+      setIsReady(false);
       setSelectedGroup(null);
       setSelectedUser(null);
       setMessages([]);
       setStatus('disconnected');
+      setMonitorMode('single');
     }
+  };
+
+  const renderMonitorModeSelector = () => {
+    if (!isReady || monitorMode === 'multi') return null;
+    
+    return (
+      <div className="text-center mb-4">
+        <h6 className="text-muted mb-2">Choose Monitoring Mode:</h6>
+        <ButtonGroup>
+          <Button
+            variant={monitorMode === 'single' ? 'primary' : 'outline-primary'}
+            onClick={() => setMonitorMode('single')}
+          >
+            <i className="fas fa-user me-2"></i>
+            Single Group Mode
+          </Button>
+          <Button
+            variant={monitorMode === 'multi' ? 'primary' : 'outline-primary'}
+            onClick={() => setMonitorMode('multi')}
+          >
+            <i className="fas fa-layer-group me-2"></i>
+            Multi-Group Mode
+          </Button>
+        </ButtonGroup>
+        <div className="mt-2">
+          <small className="text-muted">
+            {monitorMode === 'single' ? 
+              'Monitor one group at a time with user filtering' : 
+              'Monitor multiple groups simultaneously'
+            }
+          </small>
+        </div>
+      </div>
+    );
   };
 
   const renderCurrentStep = () => {
@@ -176,14 +217,26 @@ function App() {
       return <WhatsAppLogin socket={socket} />;
     }
     
+    if (monitorMode === 'multi') {
+      return (
+        <MultiGroupMonitor 
+          socket={socket}
+          onGoBack={() => setMonitorMode('single')}
+        />
+      );
+    }
+    
     if (!selectedGroup) {
       return (
-        <GroupSelection 
-          onGroupSelected={handleGroupSelected}
-          onLogout={handleLogout}
-          isReady={isReady} // ADD THIS PROP
-          socket={socket} // ADD THIS PROP
-        />
+        <>
+          {renderMonitorModeSelector()}
+          <GroupSelection 
+            onGroupSelected={handleGroupSelected}
+            onLogout={handleLogout}
+            isReady={isReady}
+            socket={socket}
+          />
+        </>
       );
     }
     
@@ -208,7 +261,6 @@ function App() {
     );
   };
 
-  // UPDATE: Get status text
   const getStatusText = () => {
     if (isReady) return 'WhatsApp Ready';
     if (isAuthenticated) return 'Initializing...';
@@ -216,7 +268,6 @@ function App() {
     return 'Disconnected';
   };
 
-  // UPDATE: Get status color
   const getStatusColor = () => {
     if (isReady) return 'bg-success';
     if (isAuthenticated) return 'bg-warning';
@@ -227,9 +278,16 @@ function App() {
   return (
     <Container fluid className="app-container">
       <Row className="justify-content-center">
-        <Col lg={10} xl={8}>
+        <Col lg={10} xl={monitorMode === 'multi' ? 11 : 8}>
           <div className="app-header text-center mb-4">
-            <h1 className="display-4 text-primary">WhatsApp Monitor</h1>
+            <h1 className="display-4 text-primary">
+              WhatsApp Monitor
+              {monitorMode === 'multi' && (
+                <Badge bg="success" className="ms-2" style={{ fontSize: '0.4em' }}>
+                  Multi-Group
+                </Badge>
+              )}
+            </h1>
             <div className="status-indicator">
               <span className={`badge ${getStatusColor()}`}>
                 {getStatusText()}
@@ -254,7 +312,7 @@ function App() {
             </Alert>
           )}
 
-          {selectedGroup && (
+          {selectedGroup && monitorMode === 'single' && (
             <Alert variant="info" className="text-center">
               <strong>Monitoring:</strong> {selectedGroup.name}
               {selectedUser && (
@@ -264,17 +322,18 @@ function App() {
               )}
             </Alert>
           )}
-          {selectedGroup && (
-  <div className="text-center mb-4">
-    <Button
-      variant="success"
-      onClick={() => window.open('http://localhost:3001/api/rss-view', '_blank')}
-    >
-      <i className="fas fa-rss me-2"></i>
-      View RSS Feed
-    </Button>
-  </div>
-)}
+
+          {selectedGroup && monitorMode === 'single' && (
+            <div className="text-center mb-4">
+              <Button
+                variant="success"
+                onClick={() => window.open('http://localhost:3001/api/rss-view', '_blank')}
+              >
+                <i className="fas fa-rss me-2"></i>
+                View RSS Feed
+              </Button>
+            </div>
+          )}
 
           {renderCurrentStep()}
         </Col>

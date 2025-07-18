@@ -16,6 +16,19 @@ const { Op } = require('sequelize');
 
 class DatabaseService {
   /**
+   * Get group by ID
+   */
+  static async getGroupById(groupId) {
+    try {
+      const group = await Group.findByPk(groupId);
+      return group ? group.toJSON() : null;
+    } catch (error) {
+      console.error('Error fetching group by ID:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Save or update a group
    */
   static async upsertGroup(groupData) {

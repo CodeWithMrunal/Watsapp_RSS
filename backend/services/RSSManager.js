@@ -6,26 +6,311 @@ const DatabaseService = require('./DatabaseService');
 
 class RSSManager {
   constructor() {
-    this.rssFeed = null;
+    this.rssFeeds = new Map(); // Map<groupId, RSS>
+    this.rssFeed = null; // Legacy single feed
     this.initialize();
   }
 
   initialize() {
+    // Initialize legacy single feed
     this.rssFeed = new RSS({
       ...config.rss,
-      // Enhanced RSS configuration
       custom_namespaces: {
         'content': 'http://purl.org/rss/1.0/modules/content/',
         'media': 'http://search.yahoo.com/mrss/',
         'dc': 'http://purl.org/dc/elements/1.1/'
       }
     });
-    console.log('✅ RSS Feed initialized with enhanced features');
+    
+    // Ensure RSS directories exist
+    fs.ensureDirSync('./rss');
+    fs.ensureDirSync('./rss/groups');
+    
+    console.log('✅ RSS Feed Manager initialized with multi-group support');
   }
 
   /**
-   * Get media type and generate appropriate HTML
+   * Get or create RSS feed for a specific group
    */
+  getOrCreateGroupFeed(groupId, groupName) {
+    if (!this.rssFeeds.has(groupId)) {
+      const groupFeed = new RSS({
+        title: `WhatsApp Monitor - ${groupName || groupId}`,
+        description: `RSS feed for WhatsApp group: ${groupName || groupId}`,
+        feed_url: `http://localhost:${config.server.port}/rss/groups/${groupId}/feed.xml`,
+        site_url: `http://localhost:${config.server.port}/api/rss-view/${groupId}`,
+        author: 'WhatsApp Monitor',
+        pubDate: new Date().toISOString(),
+        custom_namespaces: {
+          'content': 'http://purl.org/rss/1.0/modules/content/',
+          'media': 'http://search.yahoo.com/mrss/',
+          'dc': 'http://purl.org/dc/elements/1.1/'
+        }
+      });
+      
+      this.rssFeeds.set(groupId, groupFeed);
+    }
+    
+    return this.rssFeeds.get(groupId);
+  }
+
+  /**
+   * Update feed with new message group (enhanced for multi-group)
+   */
+  async updateFeed(messageGroup, messageHistory, groupId = null) {
+    // If groupId is provided, update group-specific feed
+    if (groupId) {
+      const groupName = messageGroup.messages?.[0]?.groupName || 'Unknown Group';
+      const groupFeed = this.getOrCreateGroupFeed(groupId, groupName);
+      
+      // Add to group-specific feed
+      await this.addMessageGroupToFeed(messageGroup, groupFeed);
+      await this.saveGroupFeed(groupId);
+      
+      // Also regenerate from database for consistency
+      await this.generateFromDatabase(groupId, { limit: 50 });
+    }
+    
+    // Always update legacy feed for backward compatibility
+    await this.addMessageGroupToFeed(messageGroup, this.rssFeed);
+    await this.saveFeed();
+  }
+
+  /**
+   * Save group-specific RSS feed
+   */
+  async saveGroupFeed(groupId) {
+    try {
+      const groupFeed = this.rssFeeds.get(groupId);
+      if (!groupFeed) return;
+      
+      const groupDir = path.join('./rss/groups', groupId);
+      fs.ensureDirSync(groupDir);
+      
+      groupFeed.pubDate = new Date().toISOString();
+      const rssXml = groupFeed.xml({ indent: true });
+      
+      const feedPath = path.join(groupDir, 'feed.xml');
+      fs.writeFileSync(feedPath, rssXml);
+      
+      // Also save a metadata file
+      const metadata = {
+        groupId,
+        lastUpdated: new Date().toISOString(),
+        itemCount: groupFeed.items.length,
+        feedUrl: `/rss/groups/${groupId}/feed.xml`
+      };
+      fs.writeFileSync(
+        path.join(groupDir, 'metadata.json'),
+        JSON.stringify(metadata, null, 2)
+      );
+      
+      console.log(`✅ RSS feed saved for group ${groupId} at ${feedPath}`);
+    } catch (error) {
+      console.error(`❌ Error saving RSS feed for group ${groupId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Generate RSS feed from database (enhanced for multi-group)
+   */
+  async generateFromDatabase(groupId, options = {}) {
+    const {
+      limit = 20,
+      authorId = null,
+      startDate = null,
+      endDate = null
+    } = options;
+
+    try {
+      console.log(`🔄 Generating RSS feed from database for group ${groupId}...`);
+      
+      // Get group info from database
+      const group = await DatabaseService.getGroupById(groupId);
+      const groupName = group?.name || 'Unknown Group';
+      
+      // Get or create group feed
+      const groupFeed = this.getOrCreateGroupFeed(groupId, groupName);
+      
+      // Reset the feed items
+      groupFeed.items = [];
+      
+      // Get message groups from database
+      const messageGroups = await DatabaseService.getMessageGroupsForRSS(groupId, {
+        limit,
+        authorId,
+        startDate,
+        endDate
+      });
+
+      console.log(`📊 Found ${messageGroups.length} message groups in database for group ${groupId}`);
+
+      // Process each message group
+      for (const group of messageGroups) {
+        await this.addMessageGroupToFeed(group, groupFeed);
+      }
+
+      // Save the group feed
+      await this.saveGroupFeed(groupId);
+      
+      // Also update legacy feed if this is the selected group
+      // (This maintains backward compatibility)
+      if (options.isSelectedGroup) {
+        this.rssFeed.items = [];
+        for (const group of messageGroups) {
+          await this.addMessageGroupToFeed(group, this.rssFeed);
+        }
+        await this.saveFeed();
+      }
+      
+      console.log(`✅ RSS feed generated from database successfully for group ${groupId}`);
+      return true;
+    } catch (error) {
+      console.error(`❌ Error generating RSS from database for group ${groupId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Generate combined RSS feed for all monitored groups
+   */
+  async generateCombinedFeed(monitoredGroupIds, options = {}) {
+    const { limit = 50 } = options;
+    
+    try {
+      console.log('🔄 Generating combined RSS feed for all monitored groups...');
+      
+      // Create a new combined feed
+      const combinedFeed = new RSS({
+        title: 'WhatsApp Monitor - All Groups',
+        description: 'Combined RSS feed for all monitored WhatsApp groups',
+        feed_url: `http://localhost:${config.server.port}/rss/combined/feed.xml`,
+        site_url: `http://localhost:${config.server.port}/api/rss-view/combined`,
+        author: 'WhatsApp Monitor',
+        pubDate: new Date().toISOString(),
+        custom_namespaces: {
+          'content': 'http://purl.org/rss/1.0/modules/content/',
+          'media': 'http://search.yahoo.com/mrss/',
+          'dc': 'http://purl.org/dc/elements/1.1/'
+        }
+      });
+      
+      // Collect all message groups from all monitored groups
+      const allMessageGroups = [];
+      
+      for (const groupId of monitoredGroupIds) {
+        const messageGroups = await DatabaseService.getMessageGroupsForRSS(groupId, {
+          limit: Math.floor(limit / monitoredGroupIds.length) // Distribute limit across groups
+        });
+        
+        allMessageGroups.push(...messageGroups);
+      }
+      
+      // Sort by timestamp (newest first)
+      allMessageGroups.sort((a, b) => b.start_timestamp - a.start_timestamp);
+      
+      // Take only the limit
+      const limitedGroups = allMessageGroups.slice(0, limit);
+      
+      console.log(`📊 Processing ${limitedGroups.length} message groups for combined feed`);
+      
+      // Add to combined feed
+      for (const group of limitedGroups) {
+        await this.addMessageGroupToFeed(group, combinedFeed);
+      }
+      
+      // Save combined feed
+      fs.ensureDirSync('./rss/combined');
+      combinedFeed.pubDate = new Date().toISOString();
+      const rssXml = combinedFeed.xml({ indent: true });
+      fs.writeFileSync('./rss/combined/feed.xml', rssXml);
+      
+      console.log('✅ Combined RSS feed generated successfully');
+      return true;
+    } catch (error) {
+      console.error('❌ Error generating combined RSS feed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all available RSS feeds
+   */
+  getAvailableFeeds() {
+    const feeds = [];
+    
+    // Add legacy main feed
+    feeds.push({
+      id: 'main',
+      name: 'Main Feed',
+      url: '/rss/feed.xml',
+      type: 'legacy'
+    });
+    
+    // Add group feeds
+    const groupsDir = './rss/groups';
+    if (fs.existsSync(groupsDir)) {
+      const groupDirs = fs.readdirSync(groupsDir, { withFileTypes: true })
+        .filter(dirent => dirent.isDirectory());
+      
+      for (const dir of groupDirs) {
+        const metadataPath = path.join(groupsDir, dir.name, 'metadata.json');
+        if (fs.existsSync(metadataPath)) {
+          try {
+            const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+            feeds.push({
+              id: dir.name,
+              name: `Group: ${dir.name}`,
+              url: `/rss/groups/${dir.name}/feed.xml`,
+              type: 'group',
+              ...metadata
+            });
+          } catch (error) {
+            console.error(`Error reading metadata for group ${dir.name}:`, error);
+          }
+        }
+      }
+    }
+    
+    // Add combined feed if it exists
+    if (fs.existsSync('./rss/combined/feed.xml')) {
+      feeds.push({
+        id: 'combined',
+        name: 'All Groups Combined',
+        url: '/rss/combined/feed.xml',
+        type: 'combined'
+      });
+    }
+    
+    return feeds;
+  }
+
+  /**
+   * Clean up old RSS feeds for groups that are no longer monitored
+   */
+  async cleanupOldFeeds(activeGroupIds) {
+    try {
+      const groupsDir = './rss/groups';
+      if (!fs.existsSync(groupsDir)) return;
+      
+      const groupDirs = fs.readdirSync(groupsDir, { withFileTypes: true })
+        .filter(dirent => dirent.isDirectory())
+        .map(dirent => dirent.name);
+      
+      for (const dirName of groupDirs) {
+        if (!activeGroupIds.includes(dirName)) {
+          const dirPath = path.join(groupsDir, dirName);
+          await fs.remove(dirPath);
+          console.log(`🧹 Cleaned up RSS feed for inactive group: ${dirName}`);
+        }
+      }
+    } catch (error) {
+      console.error('Error cleaning up old feeds:', error);
+    }
+  }
+
+  // Keep all existing methods for backward compatibility
   generateMediaHTML(mediaPath, messageBody, mediaType) {
     if (!mediaPath) return '';
 
@@ -55,7 +340,7 @@ class RSSManager {
         `;
       
       case 'audio':
-      case 'ptt': // Voice message
+      case 'ptt':
         return `
           <div class="media-container audio-container">
             <audio controls class="media-audio">
@@ -99,9 +384,6 @@ class RSSManager {
     }
   }
 
-  /**
-   * Generate enhanced CSS for the RSS feed (same as before)
-   */
   generateEnhancedCSS() {
     return `
       <style type="text/css">
@@ -122,6 +404,17 @@ class RSSManager {
           border-radius: 12px;
           box-shadow: 0 2px 10px rgba(0,0,0,0.1);
           border-left: 4px solid #25D366;
+        }
+        
+        .group-indicator {
+          background-color: #e3f2fd;
+          color: #1976d2;
+          padding: 4px 12px;
+          border-radius: 12px;
+          font-size: 12px;
+          font-weight: 500;
+          display: inline-block;
+          margin-bottom: 10px;
         }
         
         .message-header {
@@ -315,9 +608,6 @@ class RSSManager {
     `;
   }
 
-  /**
-   * Generate JavaScript for enhanced functionality (same as before)
-   */
   generateEnhancedJS() {
     return `
       <script type="text/javascript">
@@ -404,9 +694,6 @@ class RSSManager {
     `;
   }
 
-  /**
-   * Format message body for RSS feed with enhanced link handling
-   */
   formatMessageForRSS(body) {
     if (!body) return '';
     
@@ -442,52 +729,9 @@ class RSSManager {
   }
 
   /**
-   * Generate RSS feed from database
+   * Add a message group to the specified RSS feed
    */
-  async generateFromDatabase(groupId, options = {}) {
-    const {
-      limit = 20,
-      authorId = null,
-      startDate = null,
-      endDate = null
-    } = options;
-
-    try {
-      console.log('🔄 Generating RSS feed from database...');
-      
-      // Reset the feed
-      this.initialize();
-      
-      // Get message groups from database
-      const messageGroups = await DatabaseService.getMessageGroupsForRSS(groupId, {
-        limit,
-        authorId,
-        startDate,
-        endDate
-      });
-
-      console.log(`📊 Found ${messageGroups.length} message groups in database`);
-
-      // Process each message group
-      for (const group of messageGroups) {
-        await this.addMessageGroupToFeed(group);
-      }
-
-      // Save the feed
-      await this.saveFeed();
-      
-      console.log('✅ RSS feed generated from database successfully');
-      return true;
-    } catch (error) {
-      console.error('❌ Error generating RSS from database:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Add a message group to the RSS feed
-   */
-  async addMessageGroupToFeed(messageGroup) {
+  async addMessageGroupToFeed(messageGroup, feed = this.rssFeed) {
     let description = '';
     let title = `Messages from ${messageGroup.Author?.push_name || messageGroup.author_id}`;
     let mediaCount = 0;
@@ -502,6 +746,12 @@ class RSSManager {
     
     // Start message container
     description += '<div class="message-container">';
+    
+    // Add group indicator if available
+    if (messageGroup.messages?.[0]?.groupName) {
+      description += `<div class="group-indicator">📱 ${messageGroup.messages[0].groupName}</div>`;
+    }
+    
     description += `<div class="message-header">
       <div class="author-name">${messageGroup.Author?.push_name || messageGroup.author_id}</div>
       <div class="message-time">${new Date(messageGroup.start_date).toLocaleString()} - ${new Date(messageGroup.end_date).toLocaleString()}</div>
@@ -611,26 +861,19 @@ class RSSManager {
       }
     }
 
-    this.rssFeed.item(rssItem);
+    feed.item(rssItem);
   }
 
-  /**
-   * Format duration helper
-   */
   formatDuration(seconds) {
     if (seconds < 60) return `${seconds}s`;
     if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
     return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
   }
 
-  /**
-   * Save the feed to file
-   */
   async saveFeed() {
     try {
       fs.ensureDirSync('./rss');
       this.rssFeed.pubDate = new Date().toISOString();
-      // Save RSS feed with proper formatting
       const rssXml = this.rssFeed.xml({ indent: true });
       fs.writeFileSync('./rss/feed.xml', rssXml);
       
@@ -641,22 +884,6 @@ class RSSManager {
     }
   }
 
-  /**
-   * Legacy method - redirect to database generation
-   */
-  async updateFeed(messageGroup, messageHistory) {
-    console.log('⚠️  updateFeed called - redirecting to database generation');
-    
-    // For backward compatibility, we'll just trigger a database regeneration
-    // You might want to get the group ID from somewhere appropriate
-    if (messageGroup.groupId) {
-      await this.generateFromDatabase(messageGroup.groupId, { limit: 50 });
-    }
-  }
-
-  /**
-   * Get MIME type for media type
-   */
   getMimeType(type) {
     const mimeTypes = {
       'image': 'image/jpeg',
