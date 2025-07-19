@@ -123,6 +123,9 @@ function UserFilter({ selectedGroup, selectedUser, onUserSelected, onFetchHistor
                 <option value={100}>100 messages</option>
                 <option value={200}>200 messages</option>
                 <option value={300}>300 messages</option>
+                <option value={500}>500 messages</option>
+                <option value={1000}>1000 messages</option>
+                <option value={2000}>2000 messages</option>
               </Form.Control>
               <Form.Text className="text-muted">
                 Number of past messages to fetch from the group

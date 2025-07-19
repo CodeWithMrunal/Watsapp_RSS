@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Button, Badge, ListGroup, Alert, Spinner, Form, Row, Col, Tab, Tabs } from 'react-bootstrap';
+import { Card, Button, Badge, ListGroup, Alert, Spinner, Form, Row, Col, Tab, Tabs, ButtonGroup, Collapse } from 'react-bootstrap';
 import axios from 'axios';
 import moment from 'moment';
 
@@ -14,6 +14,10 @@ function MultiGroupMonitor({ socket, onGoBack }) {
   const [activeTab, setActiveTab] = useState('all');
   const [fetchingHistory, setFetchingHistory] = useState({});
   const [statistics, setStatistics] = useState({});
+  const [historyLimits, setHistoryLimits] = useState({});
+  const [showGrouped, setShowGrouped] = useState({});
+  const [expandedGroups, setExpandedGroups] = useState({});
+  const [previewMedia, setPreviewMedia] = useState(null);
 
   useEffect(() => {
     loadData();
@@ -43,6 +47,10 @@ function MultiGroupMonitor({ socket, onGoBack }) {
 
     socket.on('group_added', (groupData) => {
       setMonitoredGroups(prev => [...prev, groupData]);
+      // Set default values for new group
+      setHistoryLimits(prev => ({ ...prev, [groupData.id]: 50 }));
+      setShowGrouped(prev => ({ ...prev, [groupData.id]: true }));
+      
       // Update available groups to reflect monitored status
       setAvailableGroups(prev => 
         prev.map(g => g.id === groupData.id ? { ...g, isMonitored: true } : g)
@@ -55,6 +63,17 @@ function MultiGroupMonitor({ socket, onGoBack }) {
         const newMessages = { ...prev };
         delete newMessages[groupId];
         return newMessages;
+      });
+      // Clean up state for removed group
+      setHistoryLimits(prev => {
+        const newLimits = { ...prev };
+        delete newLimits[groupId];
+        return newLimits;
+      });
+      setShowGrouped(prev => {
+        const newGrouped = { ...prev };
+        delete newGrouped[groupId];
+        return newGrouped;
       });
       // Update available groups
       setAvailableGroups(prev => 
@@ -69,6 +88,16 @@ function MultiGroupMonitor({ socket, onGoBack }) {
       // Load monitored groups
       const monitoredRes = await axios.get(`${API_BASE}/api/multi-group/monitored-groups`);
       setMonitoredGroups(monitoredRes.data.groups);
+      
+      // Initialize state for each monitored group
+      monitoredRes.data.groups.forEach(group => {
+        if (!historyLimits[group.id]) {
+          setHistoryLimits(prev => ({ ...prev, [group.id]: 50 }));
+        }
+        if (showGrouped[group.id] === undefined) {
+          setShowGrouped(prev => ({ ...prev, [group.id]: true }));
+        }
+      });
 
       // Load all available groups
       const groupsRes = await axios.get(`${API_BASE}/api/groups`);
@@ -105,7 +134,8 @@ function MultiGroupMonitor({ socket, onGoBack }) {
     }
   };
 
-  const handleFetchHistory = async (groupId, limit = 50) => {
+  const handleFetchHistory = async (groupId) => {
+    const limit = historyLimits[groupId] || 50;
     setFetchingHistory(prev => ({ ...prev, [groupId]: true }));
     try {
       const res = await axios.post(`${API_BASE}/api/multi-group/fetch-group-history`, {
@@ -124,10 +154,197 @@ function MultiGroupMonitor({ socket, onGoBack }) {
     }
   };
 
+  const handleMediaClick = (msg) => {
+    if (msg.mediaPath) {
+      setPreviewMedia({ 
+        ...msg, 
+        src: `${API_BASE}/${msg.mediaPath.replace(/\\/g, '/')}` 
+      });
+    }
+  };
+
+  const closePreview = () => setPreviewMedia(null);
+
+  const toggleGroupExpansion = (groupId, messageGroupId) => {
+    const key = `${groupId}-${messageGroupId}`;
+    setExpandedGroups(prev => ({
+      ...prev,
+      [key]: !prev[key]
+    }));
+  };
+
+  const getMessageTypeIcon = (type, hasMedia) => {
+    if (hasMedia) {
+      switch (type) {
+        case 'image':
+          return <i className="fas fa-image text-success"></i>;
+        case 'video':
+          return <i className="fas fa-video text-info"></i>;
+        case 'audio':
+        case 'ptt':
+          return <i className="fas fa-microphone text-warning"></i>;
+        case 'document':
+          return <i className="fas fa-file text-secondary"></i>;
+        default:
+          return <i className="fas fa-paperclip text-muted"></i>;
+      }
+    }
+    return <i className="fas fa-comment text-primary"></i>;
+  };
+
+  const renderMessageGroup = (msgGroup, groupId) => {
+    const key = `${groupId}-${msgGroup.id}`;
+    const isExpanded = expandedGroups[key];
+    const hasMultipleMessages = msgGroup.messages && msgGroup.messages.length > 1;
+
+    return (
+      <ListGroup.Item key={`${msgGroup.id}-${Date.now()}`}>
+        <div className="d-flex justify-content-between align-items-start">
+          <div className="flex-grow-1">
+            <div className="d-flex align-items-center mb-1">
+              <h6 className="mb-0 me-2">{msgGroup.author}</h6>
+              {hasMultipleMessages && (
+                <Badge bg="secondary" pill>{msgGroup.messages.length} messages</Badge>
+              )}
+            </div>
+            
+            {/* First message always visible */}
+            <div className="mb-1">
+              {msgGroup.messages?.[0]?.body ? (
+                <p className="mb-0">{msgGroup.messages[0].body}</p>
+              ) : msgGroup.messages?.[0]?.hasMedia ? (
+                <div>
+                  <span className="text-primary" style={{ cursor: 'pointer' }}
+                    onClick={() => handleMediaClick(msgGroup.messages[0])}>
+                    {getMessageTypeIcon(msgGroup.messages[0].type, true)} View {msgGroup.messages[0].type}
+                  </span>
+                  {msgGroup.messages[0].type === 'image' && msgGroup.messages[0].mediaPath && (
+                    <img
+                      src={`${API_BASE}/${msgGroup.messages[0].mediaPath.replace(/\\/g, '/')}`}
+                      alt="media"
+                      className="d-block mt-1"
+                      onClick={() => handleMediaClick(msgGroup.messages[0])}
+                      style={{ maxWidth: '200px', cursor: 'pointer', borderRadius: '4px' }}
+                    />
+                  )}
+                </div>
+              ) : (
+                <span className="text-muted">[{msgGroup.messages?.[0]?.type || 'message'}]</span>
+              )}
+            </div>
+
+            {/* Expandable additional messages */}
+            {hasMultipleMessages && (
+              <>
+                <Collapse in={isExpanded}>
+                  <div>
+                    {msgGroup.messages.slice(1).map((message, index) => (
+                      <div key={index} className="mt-2 ps-3 border-start">
+                        <small className="text-muted d-block">
+                          {moment(message.timestamp * 1000).format('HH:mm')}
+                        </small>
+                        {message.body ? (
+                          <p className="mb-0">{message.body}</p>
+                        ) : message.hasMedia ? (
+                          <div>
+                            <span className="text-primary" style={{ cursor: 'pointer' }}
+                              onClick={() => handleMediaClick(message)}>
+                              {getMessageTypeIcon(message.type, true)} View {message.type}
+                            </span>
+                            {message.type === 'image' && message.mediaPath && (
+                              <img
+                                src={`${API_BASE}/${message.mediaPath.replace(/\\/g, '/')}`}
+                                alt="media"
+                                className="d-block mt-1"
+                                onClick={() => handleMediaClick(message)}
+                                style={{ maxWidth: '200px', cursor: 'pointer', borderRadius: '4px' }}
+                              />
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-muted">[{message.type || 'message'}]</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </Collapse>
+                <Button
+                  variant="link"
+                  size="sm"
+                  className="p-0 mt-1"
+                  onClick={() => toggleGroupExpansion(groupId, msgGroup.id)}
+                >
+                  {isExpanded ? 'Show less' : 'Show more'}
+                </Button>
+              </>
+            )}
+            
+            <small className="text-muted d-block mt-1">
+              {moment(msgGroup.timestamp * 1000).format('MMM DD, HH:mm')}
+            </small>
+          </div>
+        </div>
+      </ListGroup.Item>
+    );
+  };
+
+  const renderIndividualMessages = (messages, groupId) => {
+    const allMessages = messages.flatMap(group =>
+      group.messages ? group.messages : [group]
+    );
+
+    return allMessages.map((message, index) => (
+      <ListGroup.Item key={`${message.id}-${index}`}>
+        <div className="d-flex justify-content-between align-items-start">
+          <div className="flex-grow-1">
+            <div className="d-flex align-items-center mb-1">
+              <h6 className="mb-0">{message.author}</h6>
+              <small className="text-muted ms-2">
+                {moment(message.timestamp * 1000).format('HH:mm')}
+              </small>
+            </div>
+            {message.body ? (
+              <p className="mb-0">{message.body}</p>
+            ) : message.hasMedia ? (
+              <div>
+                <span className="text-primary" style={{ cursor: 'pointer' }}
+                  onClick={() => handleMediaClick(message)}>
+                  {getMessageTypeIcon(message.type, true)} View {message.type}
+                </span>
+                {message.type === 'image' && message.mediaPath && (
+                  <img
+                    src={`${API_BASE}/${message.mediaPath.replace(/\\/g, '/')}`}
+                    alt="media"
+                    className="d-block mt-1"
+                    onClick={() => handleMediaClick(message)}
+                    style={{ maxWidth: '200px', cursor: 'pointer', borderRadius: '4px' }}
+                  />
+                )}
+                {message.type === 'video' && message.mediaPath && (
+                  <video
+                    src={`${API_BASE}/${message.mediaPath.replace(/\\/g, '/')}`}
+                    className="d-block mt-1"
+                    onClick={() => handleMediaClick(message)}
+                    style={{ maxWidth: '200px', cursor: 'pointer', borderRadius: '4px' }}
+                    muted
+                  />
+                )}
+              </div>
+            ) : (
+              <span className="text-muted">[{message.type || 'message'}]</span>
+            )}
+          </div>
+        </div>
+      </ListGroup.Item>
+    ));
+  };
+
   const renderGroupTab = (group) => {
     const messages = selectedGroupMessages[group.id] || [];
     const stats = statistics[group.id];
     const isFetching = fetchingHistory[group.id];
+    const limit = historyLimits[group.id] || 50;
+    const isGrouped = showGrouped[group.id] !== false;
 
     return (
       <Tab eventKey={group.id} title={
@@ -139,46 +356,80 @@ function MultiGroupMonitor({ socket, onGoBack }) {
         </span>
       } key={group.id}>
         <Card className="mt-3">
-          <Card.Header className="d-flex justify-content-between align-items-center">
-            <div>
-              <h6 className="mb-0">{group.name}</h6>
-              <small className="text-muted">
-                Added: {moment(group.addedAt).fromNow()}
-              </small>
-            </div>
-            <div>
-              <Button
-                variant="info"
-                size="sm"
-                className="me-2"
-                onClick={() => handleFetchHistory(group.id)}
-                disabled={isFetching}
-              >
-                {isFetching ? (
-                  <Spinner animation="border" size="sm" />
-                ) : (
-                  <>
-                    <i className="fas fa-history me-1"></i>
-                    Fetch History
-                  </>
-                )}
-              </Button>
-              <Button
-                variant="success"
-                size="sm"
-                className="me-2"
-                onClick={() => window.open(`/rss/groups/${group.id}/feed.xml`, '_blank')}
-              >
-                <i className="fas fa-rss"></i>
-              </Button>
-              <Button
-                variant="danger"
-                size="sm"
-                onClick={() => handleRemoveGroup(group.id)}
-              >
-                <i className="fas fa-times"></i>
-              </Button>
-            </div>
+          <Card.Header>
+            <Row className="align-items-center">
+              <Col md={4}>
+                <h6 className="mb-0">{group.name}</h6>
+                <small className="text-muted">
+                  Added: {moment(group.addedAt).fromNow()}
+                </small>
+              </Col>
+              <Col md={4}>
+                <Form.Group className="mb-0">
+                  <Form.Label className="small mb-1">History Limit:</Form.Label>
+                  <Form.Control
+                    as="select"
+                    size="sm"
+                    value={limit}
+                    onChange={(e) => setHistoryLimits(prev => ({ 
+                      ...prev, 
+                      [group.id]: parseInt(e.target.value) 
+                    }))}
+                  >
+                    <option value={25}>25 messages</option>
+                    <option value={50}>50 messages</option>
+                    <option value={100}>100 messages</option>
+                    <option value={200}>200 messages</option>
+                    <option value={300}>300 messages</option>
+                    <option value={500}>500 messages</option>
+                    <option value={1000}>1000 messages</option>
+                    <option value={2000}>2000 messages</option>
+                  </Form.Control>
+                </Form.Group>
+              </Col>
+              <Col md={4} className="text-end">
+                <Form.Check
+                  type="switch"
+                  id={`group-toggle-${group.id}`}
+                  label="Group Messages"
+                  checked={isGrouped}
+                  onChange={() => setShowGrouped(prev => ({ ...prev, [group.id]: !isGrouped }))}
+                  className="d-inline-block me-3"
+                />
+                <Button
+                  variant="info"
+                  size="sm"
+                  className="me-2"
+                  onClick={() => handleFetchHistory(group.id)}
+                  disabled={isFetching}
+                >
+                  {isFetching ? (
+                    <Spinner animation="border" size="sm" />
+                  ) : (
+                    <>
+                      <i className="fas fa-history me-1"></i>
+                      Fetch
+                    </>
+                  )}
+                </Button>
+                <Button
+                  variant="success"
+                  size="sm"
+                  className="me-2"
+                  onClick={() => window.open(`${API_BASE}/api/rss-view/group/${group.id}`, '_blank')}
+                  title="View RSS Feed"
+                >
+                  <i className="fas fa-rss"></i>
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={() => handleRemoveGroup(group.id)}
+                >
+                  <i className="fas fa-times"></i>
+                </Button>
+              </Col>
+            </Row>
           </Card.Header>
           <Card.Body>
             {stats && (
@@ -219,26 +470,10 @@ function MultiGroupMonitor({ socket, onGoBack }) {
                 </Alert>
               ) : (
                 <ListGroup variant="flush">
-                  {messages.map((msgGroup, index) => (
-                    <ListGroup.Item key={`${msgGroup.id}-${index}`}>
-                      <div className="d-flex justify-content-between align-items-start">
-                        <div>
-                          <h6 className="mb-1">{msgGroup.author}</h6>
-                          <p className="mb-1">
-                            {msgGroup.messages?.[0]?.body || `[${msgGroup.messages?.[0]?.type || 'media'}]`}
-                          </p>
-                          <small className="text-muted">
-                            {moment(msgGroup.timestamp * 1000).format('MMM DD, HH:mm')}
-                            {msgGroup.messages?.length > 1 && (
-                              <Badge bg="secondary" className="ms-2">
-                                {msgGroup.messages.length} messages
-                              </Badge>
-                            )}
-                          </small>
-                        </div>
-                      </div>
-                    </ListGroup.Item>
-                  ))}
+                  {isGrouped 
+                    ? messages.map(msgGroup => renderMessageGroup(msgGroup, group.id))
+                    : renderIndividualMessages(messages, group.id)
+                  }
                 </ListGroup>
               )}
             </div>
@@ -276,8 +511,17 @@ function MultiGroupMonitor({ socket, onGoBack }) {
         </span>
       }>
         <Card className="mt-3">
-          <Card.Header>
+          <Card.Header className="d-flex justify-content-between align-items-center">
             <h6 className="mb-0">Combined View - All Monitored Groups</h6>
+            <Button
+              variant="success"
+              size="sm"
+              onClick={() => window.open(`${API_BASE}/api/rss-view/combined`, '_blank')}
+              title="View Combined RSS Feed"
+            >
+              <i className="fas fa-rss me-1"></i>
+              View Combined Feed
+            </Button>
           </Card.Header>
           <Card.Body>
             <div className="messages-container" style={{ maxHeight: '500px', overflowY: 'auto' }}>
@@ -338,7 +582,7 @@ function MultiGroupMonitor({ socket, onGoBack }) {
               variant="success"
               size="sm"
               className="me-2"
-              onClick={() => window.open('/rss/combined/feed.xml', '_blank')}
+              onClick={() => window.open(`${API_BASE}/api/rss-view/combined`, '_blank')}
               title="Combined RSS Feed"
             >
               <i className="fas fa-rss me-1"></i>
@@ -448,6 +692,66 @@ function MultiGroupMonitor({ socket, onGoBack }) {
           </div>
         </Card.Body>
       </Card>
+
+      {/* Media Preview Modal */}
+      {previewMedia && (
+        <div className="media-preview-overlay" onClick={closePreview} style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.8)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999
+        }}>
+          <div className="media-preview-content" onClick={(e) => e.stopPropagation()} style={{
+            maxWidth: '90%',
+            maxHeight: '90%',
+            position: 'relative'
+          }}>
+            <Button 
+              variant="danger" 
+              onClick={closePreview}
+              style={{ position: 'absolute', top: -40, right: 0 }}
+            >
+              Close
+            </Button>
+
+            {previewMedia.type === 'image' && (
+              <img 
+                src={previewMedia.src} 
+                alt="Preview" 
+                style={{ maxWidth: '100%', maxHeight: '80vh', borderRadius: '8px' }} 
+              />
+            )}
+
+            {previewMedia.type === 'video' && previewMedia.src && (
+              <video
+                src={previewMedia.src}
+                controls
+                autoPlay
+                style={{ maxWidth: '100%', maxHeight: '80vh', borderRadius: '8px' }}
+              />
+            )}
+
+            {previewMedia.type === 'audio' && previewMedia.src && (
+              <audio
+                src={previewMedia.src}
+                controls
+                autoPlay
+                style={{ width: '100%' }}
+              />
+            )}
+
+            {!['image', 'video', 'audio'].includes(previewMedia.type) && (
+              <p className="text-white">Preview not supported for this media type.</p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

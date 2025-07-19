@@ -4,7 +4,7 @@ const http = require('http');
 const cors = require('cors');
 const path = require('path');
 const createMultiGroupRoutes = require('./routes/multiGroupRoutes');
-
+const createRSSViewRoutes = require('./routes/rssViewRoutes');
 
 // Import configuration and utilities
 const config = require('./config');
@@ -144,13 +144,15 @@ class WhatsAppMonitorServer {
   }
 
   setupRoutes() {
-    // API routes
     this.app.use('/api', createApiRoutes(this.whatsappManager));
     
     // NEW: Multi-group API routes
     this.app.use('/api/multi-group', createMultiGroupRoutes(this.whatsappManager));
     
-    // Enhanced RSS feed routes for multi-group
+    // NEW: RSS View routes (for web interface)
+    this.app.use('/api/rss-view', createRSSViewRoutes(this.whatsappManager, this.rssManager));
+    
+    // Enhanced RSS feed route - redirect to web view by default
     this.app.get('/rss', (req, res) => {
       res.redirect('/api/rss-view');
     });
@@ -191,6 +193,11 @@ class WhatsAppMonitorServer {
         feeds,
         count: feeds.length
       });
+    });
+    
+    // Main RSS web view route (also accessible directly)
+    this.app.get('/', (req, res) => {
+      res.redirect('/api/rss-view');
     });
     
     // Enhanced health check endpoint with multi-group info
