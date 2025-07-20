@@ -9,9 +9,22 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser,
   const handleMediaClick = (msg) => {
     console.log('Media clicked:', msg);
     if (msg.mediaPath) {
-      setPreviewMedia({ ...msg, src: `http://localhost:3001/${msg.mediaPath.replace(/\\/g, '/')}` });
+      const mediaUrl = msg.mediaPath.startsWith('http') 
+        ? msg.mediaPath 
+        : `http://localhost:3001/${msg.mediaPath.replace(/\\/g, '/')}`;
+      setPreviewMedia({ ...msg, src: mediaUrl });
+    } else if (msg.mediaMetadata?.path) {
+      const mediaUrl = msg.mediaMetadata.path.startsWith('http')
+        ? msg.mediaMetadata.path
+        : `http://localhost:3001/${msg.mediaMetadata.path.replace(/\\/g, '/')}`;
+      setPreviewMedia({
+        ...msg,
+        src: mediaUrl,
+        mediaPath: msg.mediaMetadata.path,
+        type: msg.type
+      });
     } else {
-      console.log("msg.mediapath is undefined");
+      console.log("No media path found in message:", msg);
     }
   };
 
@@ -39,6 +52,7 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser,
         case 'video':
           return <i className="fas fa-video text-info"></i>;
         case 'audio':
+        case 'ptt':
           return <i className="fas fa-microphone text-warning"></i>;
         case 'document':
           return <i className="fas fa-file text-secondary"></i>;
@@ -54,6 +68,19 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser,
     // Extract phone number from author ID and format it
     const phoneNumber = author.replace('@c.us', '');
     return phoneNumber.includes('+') ? phoneNumber : `+${phoneNumber}`;
+  };
+
+  const getMediaUrl = (message) => {
+    if (message.mediaPath) {
+      return message.mediaPath.startsWith('http') 
+        ? message.mediaPath 
+        : `http://localhost:3001/${message.mediaPath.replace(/\\/g, '/')}`;
+    } else if (message.mediaMetadata?.path) {
+      return message.mediaMetadata.path.startsWith('http')
+        ? message.mediaMetadata.path
+        : `http://localhost:3001/${message.mediaMetadata.path.replace(/\\/g, '/')}`;
+    }
+    return null;
   };
 
   const renderMessageGroup = (group) => {
@@ -108,24 +135,29 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser,
                 <div className="message-content">
                   {group.messages[0].body ? (
                     <p className="mb-0">{group.messages[0].body}</p>
-                  ) : (
+                  ) : group.messages[0].hasMedia ? (
                     <>
                       <span
                         className="text-primary clickable"
                         onClick={() => handleMediaClick(group.messages[0])}
+                        style={{ cursor: 'pointer' }}
                       >
                         [Click to view {group.messages[0].type}]
                       </span>
-                      {group.messages[0].type === 'image' && group.messages[0].mediaPath && (
+                      {group.messages[0].type === 'image' && getMediaUrl(group.messages[0]) && (
                         <img
-                          src={`http://localhost:3001/${group.messages[0].mediaPath.replace(/\\/g, '/')}`}
+                          src={getMediaUrl(group.messages[0])}
                           alt="media"
                           className="thumbnail mt-1"
                           onClick={() => handleMediaClick(group.messages[0])}
-                          style={{ maxWidth: '120px', cursor: 'pointer', borderRadius: '4px' }}
+                          style={{ maxWidth: '200px', cursor: 'pointer', borderRadius: '4px' }}
                         />
                       )}
                     </>
+                  ) : (
+                    <p className="mb-0 text-muted font-italic">
+                      [Media: {group.messages[0].type}]
+                    </p>
                   )}
                 </div>
               </div>
@@ -163,33 +195,38 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser,
                         </small>
                         {message.body ? (
                           <p className="mb-0">{message.body}</p>
-                        ) : (
+                        ) : message.hasMedia ? (
                           <>
                             <span
                               className="text-primary clickable"
                               onClick={() => handleMediaClick(message)}
+                              style={{ cursor: 'pointer' }}
                             >
                               [Click to view {message.type}]
                             </span>
-                            {message.type === 'image' && message.mediaPath && (
+                            {message.type === 'image' && getMediaUrl(message) && (
                               <img
-                                src={`http://localhost:3001/${message.mediaPath.replace(/\\/g, '/')}`}
+                                src={getMediaUrl(message)}
                                 alt="media"
                                 className="thumbnail mt-1"
                                 onClick={() => handleMediaClick(message)}
-                                style={{ maxWidth: '120px', cursor: 'pointer', borderRadius: '4px' }}
+                                style={{ maxWidth: '200px', cursor: 'pointer', borderRadius: '4px' }}
                               />
                             )}
-                            {message.type === 'video' && message.mediaPath && (
+                            {message.type === 'video' && getMediaUrl(message) && (
                               <video
-                                src={`http://localhost:3001/${message.mediaPath.replace(/\\/g, '/')}`}
+                                src={getMediaUrl(message)}
                                 className="thumbnail mt-1"
                                 onClick={() => handleMediaClick(message)}
-                                style={{ maxWidth: '120px', cursor: 'pointer', borderRadius: '4px' }}
+                                style={{ maxWidth: '200px', cursor: 'pointer', borderRadius: '4px' }}
                                 muted
                               />
                             )}
                           </>
+                        ) : (
+                          <p className="mb-0 text-muted font-italic">
+                            [Media: {message.type}]
+                          </p>
                         )}
                       </div>
                     </div>
@@ -233,33 +270,38 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser,
                 <div className="message-content">
                   {message.body ? (
                     <p className="mb-0">{message.body}</p>
-                  ) : (
+                  ) : message.hasMedia ? (
                     <>
                       <span
                         className="text-primary clickable"
                         onClick={() => handleMediaClick(message)}
+                        style={{ cursor: 'pointer' }}
                       >
                         [Click to view {message.type}]
                       </span>
-                      {message.type === 'image' && message.mediaPath && (
+                      {message.type === 'image' && getMediaUrl(message) && (
                         <img
-                          src={`http://localhost:3001/${message.mediaPath.replace(/\\/g, '/')}`}
+                          src={getMediaUrl(message)}
                           alt="media"
                           className="thumbnail mt-1"
                           onClick={() => handleMediaClick(message)}
-                          style={{ maxWidth: '120px', cursor: 'pointer', borderRadius: '4px' }}
+                          style={{ maxWidth: '200px', cursor: 'pointer', borderRadius: '4px' }}
                         />
                       )}
-                      {message.type === 'video' && message.mediaPath && (
+                      {message.type === 'video' && getMediaUrl(message) && (
                         <video
-                          src={`http://localhost:3001/${message.mediaPath.replace(/\\/g, '/')}`}
+                          src={getMediaUrl(message)}
                           className="thumbnail mt-1"
                           onClick={() => handleMediaClick(message)}
-                          style={{ maxWidth: '120px', cursor: 'pointer', borderRadius: '4px' }}
+                          style={{ maxWidth: '200px', cursor: 'pointer', borderRadius: '4px' }}
                           muted
                         />
                       )}
                     </>
+                  ) : (
+                    <p className="mb-0 text-muted font-italic">
+                      [Media: {message.type}]
+                    </p>
                   )}
                 </div>
               </div>
@@ -346,14 +388,34 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser,
         )}
 
         {previewMedia && (
-          <div className="media-preview-overlay" onClick={closePreview}>
-            <div className="media-preview-content" onClick={(e) => e.stopPropagation()}>
-              <button className="btn btn-danger mb-3" onClick={closePreview}>
+          <div className="media-preview-overlay" onClick={closePreview} style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999
+          }}>
+            <div className="media-preview-content" onClick={(e) => e.stopPropagation()} style={{
+              maxWidth: '90%',
+              maxHeight: '90%',
+              position: 'relative'
+            }}>
+              <button className="btn btn-danger mb-3" onClick={closePreview} style={{
+                position: 'absolute',
+                top: -40,
+                right: 0,
+                zIndex: 10000
+              }}>
                 Close
               </button>
 
               {previewMedia.type === 'image' && (
-                <img src={previewMedia.src} alt="Preview" style={{ maxWidth: '100%', borderRadius: '8px' }} />
+                <img src={previewMedia.src} alt="Preview" style={{ maxWidth: '100%', maxHeight: '80vh', borderRadius: '8px' }} />
               )}
 
               {previewMedia.type === 'video' && previewMedia.src && (
@@ -361,12 +423,30 @@ function MessageDisplay({ messages, showGrouped, onToggleGrouping, selectedUser,
                   src={previewMedia.src}
                   controls
                   autoPlay
-                  style={{ maxWidth: '100%', borderRadius: '8px' }}
+                  style={{ maxWidth: '100%', maxHeight: '80vh', borderRadius: '8px' }}
                 />
               )}
 
-              {!['image', 'video'].includes(previewMedia.type) && (
-                <p className="text-muted">Preview not supported for this media type.</p>
+              {previewMedia.type === 'audio' && previewMedia.src && (
+                <audio
+                  src={previewMedia.src}
+                  controls
+                  autoPlay
+                  style={{ width: '100%' }}
+                />
+              )}
+
+              {previewMedia.type === 'ptt' && previewMedia.src && (
+                <audio
+                  src={previewMedia.src}
+                  controls
+                  autoPlay
+                  style={{ width: '100%' }}
+                />
+              )}
+
+              {!['image', 'video', 'audio', 'ptt'].includes(previewMedia.type) && (
+                <p className="text-white">Preview not supported for this media type.</p>
               )}
             </div>
           </div>

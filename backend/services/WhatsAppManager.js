@@ -594,7 +594,11 @@ class WhatsAppManager {
       throw new Error('No group selected or client not ready');
     }
     
-    return this.fetchHistoryForGroup(this.selectedGroup.id, limit);
+    // Delegate to fetchHistoryForGroup and return in the expected format
+    const result = await this.fetchHistoryForGroup(this.selectedGroup.id, limit);
+    
+    // Return just the messages array for backward compatibility
+    return result.messages || result;
   }
 
   getMessages(grouped = true) {

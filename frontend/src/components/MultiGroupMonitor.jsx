@@ -155,11 +155,28 @@ function MultiGroupMonitor({ socket, onGoBack }) {
   };
 
   const handleMediaClick = (msg) => {
+    console.log('Media clicked:', msg);
     if (msg.mediaPath) {
+      // Ensure proper URL format
+      const mediaUrl = msg.mediaPath.startsWith('http') 
+        ? msg.mediaPath 
+        : `${API_BASE}/${msg.mediaPath.replace(/\\/g, '/')}`;
       setPreviewMedia({ 
         ...msg, 
-        src: `${API_BASE}/${msg.mediaPath.replace(/\\/g, '/')}` 
+        src: mediaUrl
       });
+    } else if (msg.mediaMetadata?.path) {
+      // Handle new media metadata format
+      const mediaUrl = msg.mediaMetadata.path.startsWith('http')
+        ? msg.mediaMetadata.path
+        : `${API_BASE}/${msg.mediaMetadata.path.replace(/\\/g, '/')}`;
+      setPreviewMedia({
+        ...msg,
+        src: mediaUrl,
+        mediaPath: msg.mediaMetadata.path
+      });
+    } else {
+      console.log("No media path found in message");
     }
   };
 

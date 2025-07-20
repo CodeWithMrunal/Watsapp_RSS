@@ -5,6 +5,7 @@ import shutil
 directories_to_delete = [
     Path('backend/.wwebjs_auth'),
     Path('backend/.wwebjs_cache'),
+    Path('/Users/mrunal.a/Desktop/WATSAPP_WITH_RSS/whatsapp-monitor-2/backend/session-data.json'),
     Path('backend/media'),
     Path('backend/rss'),
     Path('BestImg_Detection/best_images'),

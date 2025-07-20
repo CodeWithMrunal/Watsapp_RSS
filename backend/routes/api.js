@@ -72,18 +72,38 @@ function createApiRoutes(whatsappManager) {
     }
   });
 
-  router.post('/fetch-history', async (req, res) => {
-    console.log('POST /api/fetch-history', req.body);
+// This is a fix for the fetch-history endpoint in your api.js file
+// Find the '/fetch-history' endpoint and update it as follows:
+
+router.post('/fetch-history', async (req, res) => {
+  try {
     const { limit = 50 } = req.body;
     
-    try {
-      const messages = await whatsappManager.fetchHistory(limit);
-      res.json({ messages });
-    } catch (error) {
-      console.error('Error fetching history:', error);
-      res.status(500).json({ error: error.message });
+    if (!whatsappManager.isClientReady()) {
+      return res.status(503).json({ 
+        success: false,
+        error: 'WhatsApp client not ready',
+        messages: [] 
+      });
     }
-  });
+    
+    const result = await whatsappManager.fetchHistory(limit);
+    
+    // Ensure we're sending the correct response format
+    res.json({ 
+      success: true,
+      messages: result.messages || result,
+      count: (result.messages || result).length
+    });
+  } catch (error) {
+    console.error('Error fetching history:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to fetch message history',
+      messages: []
+    });
+  }
+});
 
   router.get('/messages', (req, res) => {
     const { grouped = true } = req.query;

@@ -126,7 +126,19 @@ function App() {
   const handleFetchHistory = async (limit) => {
     try {
       const response = await axios.post(`${API_BASE}/api/fetch-history`, { limit });
-      setMessages(response.data.messages);
+      console.log('Fetch history response:', response.data);
+      
+      // Handle the response properly
+      if (response.data.success && response.data.messages) {
+        setMessages(response.data.messages);
+      } else if (response.data.messages) {
+        setMessages(response.data.messages);
+      } else if (Array.isArray(response.data)) {
+        setMessages(response.data);
+      } else {
+        console.error('Unexpected response format:', response.data);
+        setError('Received unexpected data format from server');
+      }
     } catch (error) {
       setError('Failed to fetch message history');
       console.error('Error fetching history:', error);
