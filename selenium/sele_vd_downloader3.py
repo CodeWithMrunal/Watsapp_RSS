@@ -112,71 +112,117 @@ class DatabaseLinkDownloadManager:
         try:
             with self.get_db_connection() as conn:
                 with conn.cursor() as cur:
+                    # --- FINAL FIX: Use the correct camelCase column names from the database schema ---
+                    created_col = 'createdAt'
+                    updated_col = 'updatedAt'
+
+                    print(f"📝 Using correct column names from database: {created_col}, {updated_col}")
+
                     for file_path in downloaded_files:
                         file_path = Path(file_path)
                         if file_path.exists():
                             # Get file info
                             file_size = file_path.stat().st_size
                             file_extension = file_path.suffix.lower()
-                            
+
                             # Determine media type
                             video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.3gp'}
                             image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
-                            
+
                             if file_extension in video_extensions:
                                 media_type = "video"
                             elif file_extension in image_extensions:
                                 media_type = "image"
                             else:
                                 media_type = "document"
-                            
+
                             # Generate file hash
                             file_hash = self.calculate_file_hash(file_path)
-                            
-                            # Insert into media table
-                            insert_query = """
-                                INSERT INTO media (
-                                    id, message_id, file_path, filename, original_filename,
-                                    file_size, file_hash, mimetype, media_type, 
-                                    is_voice_note, saved_at, metadata, createdAt, updatedAt
-                                ) VALUES (
-                                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW()
-                                )
-                                ON CONFLICT (message_id) DO UPDATE SET
-                                    file_path = EXCLUDED.file_path,
-                                    filename = EXCLUDED.filename,
-                                    file_size = EXCLUDED.file_size,
-                                    file_hash = EXCLUDED.file_hash,
-                                    saved_at = EXCLUDED.saved_at,
-                                    updatedAt = NOW()
-                            """
-                            
-                            media_metadata = {
-                                "source_link": link_info['url'],
-                                "download_date": datetime.now().isoformat(),
-                                "auto_downloaded": True
-                            }
-                            
-                            cur.execute(insert_query, (
-                                str(uuid.uuid4()),
-                                link_info['message_id'],
-                                f"media/{file_path.name}",
-                                file_path.name,
-                                file_path.name,
-                                file_size,
-                                file_hash,
-                                self.get_mimetype(file_extension),
-                                media_type,
-                                False,
-                                datetime.now(),
-                                json.dumps(media_metadata),
-                            ))
-                    
+
+                            # Check if media record already exists
+                            cur.execute(
+                                "SELECT id FROM media WHERE message_id = %s",
+                                (link_info['message_id'],)
+                            )
+                            existing = cur.fetchone()
+
+                            if existing:
+                                # Update existing record
+                                update_query = f"""
+                                    UPDATE media SET
+                                        file_path = %s,
+                                        filename = %s,
+                                        file_size = %s,
+                                        file_hash = %s,
+                                        mimetype = %s,
+                                        media_type = %s,
+                                        saved_at = %s,
+                                        metadata = %s,
+                                        "{updated_col}" = NOW()
+                                    WHERE message_id = %s
+                                """
+
+                                media_metadata = {
+                                    "source_link": link_info['url'],
+                                    "download_date": datetime.now().isoformat(),
+                                    "auto_downloaded": True,
+                                    "downloaded_by": "selenium_scraper"
+                                }
+
+                                cur.execute(update_query, (
+                                    f"media/{file_path.name}",
+                                    file_path.name,
+                                    file_size,
+                                    file_hash,
+                                    self.get_mimetype(file_extension),
+                                    media_type,
+                                    datetime.now(),
+                                    json.dumps(media_metadata),
+                                    link_info['message_id']
+                                ))
+                                print(f"📝 Updated existing media record for message {link_info['message_id']}")
+                            else:
+                                # Insert new record
+                                insert_query = f"""
+                                    INSERT INTO media (
+                                        id, message_id, file_path, filename, original_filename,
+                                        file_size, file_hash, mimetype, media_type,
+                                        is_voice_note, saved_at, metadata, "{created_col}", "{updated_col}"
+                                    ) VALUES (
+                                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW()
+                                    )
+                                """
+
+                                media_metadata = {
+                                    "source_link": link_info['url'],
+                                    "download_date": datetime.now().isoformat(),
+                                    "auto_downloaded": True,
+                                    "downloaded_by": "selenium_scraper"
+                                }
+
+                                cur.execute(insert_query, (
+                                    str(uuid.uuid4()),
+                                    link_info['message_id'],
+                                    f"media/{file_path.name}",
+                                    file_path.name,
+                                    file_path.name,
+                                    file_size,
+                                    file_hash,
+                                    self.get_mimetype(file_extension),
+                                    media_type,
+                                    False,
+                                    datetime.now(),
+                                    json.dumps(media_metadata),
+                                ))
+                                print(f"📄 Inserted new media record for message {link_info['message_id']}")
+
                     conn.commit()
-                    print(f"📄 Updated media table with {len(downloaded_files)} entries")
-                    
+                    print(f"✅ Updated media table with {len(downloaded_files)} entries")
+
         except Exception as e:
             print(f"❌ Error updating media table: {e}")
+            import traceback
+            traceback.print_exc()
 
     def calculate_file_hash(self, file_path):
         """Calculate MD5 hash of a file"""
@@ -513,7 +559,7 @@ class SeleniumVideoDownloader:
                                 print(f"🔘 Found {len(download_elements)} download elements, clicking first one...")
                                 download_elements[0].click()
                                 download_detected = True  # Give it more time
-                                time.sleep(3)
+
                     except:
                         pass
                     
@@ -608,7 +654,7 @@ class SeleniumVideoDownloader:
             
             print(f"🔗 Opening Google Drive URL: {url}")
             self.driver.get(url)
-            time.sleep(5)
+
             
             # Extract file ID from various URL formats
             file_id = None
@@ -631,7 +677,7 @@ class SeleniumVideoDownloader:
             direct_url = f"https://drive.google.com/uc?export=download&id={file_id}"
             print(f"🔗 Trying direct download URL...")
             self.driver.get(direct_url)
-            time.sleep(5)
+
             
             # Check if we got a virus warning page
             page_source = self.driver.page_source.lower()
@@ -712,7 +758,7 @@ class SeleniumVideoDownloader:
                 
                 if handled:
                     print("✅ Virus warning bypassed, download should start")
-                    time.sleep(3)
+
                     
                     # Check if download started
                     if self.wait_for_download_completion(timeout=1800):  # 30 minutes for large files
@@ -733,7 +779,7 @@ class SeleniumVideoDownloader:
             print("🔄 Trying alternative download method...")
             alt_url = f"https://drive.google.com/u/0/uc?export=download&id={file_id}"
             self.driver.get(alt_url)
-            time.sleep(5)
+
             
             # Final attempt to wait for download
             return self.wait_for_download_completion(timeout=1800)  # 30 minutes for large files
