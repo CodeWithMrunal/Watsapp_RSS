@@ -961,9 +961,10 @@ def main():
         poll_interval = 10  # Check every 10 seconds
         
         # Ask user for poll interval
-        custom_interval = input(f"Poll interval in seconds (default: {poll_interval}): ").strip()
-        if custom_interval.isdigit():
-            poll_interval = int(custom_interval)
+        # custom_interval = input(f"Poll interval in seconds (default: {poll_interval}): ").strip()
+        # custom_interval=5
+        # if custom_interval.isdigit():
+        #     poll_interval = int(custom_interval)
         
         monitor = DatabasePollingMonitor(download_manager, poll_interval)
         monitor.start()

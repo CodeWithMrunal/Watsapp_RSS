@@ -1,0 +1,186 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: whatsapp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-whatsapp_monitor_prod}
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres} -d ${DB_NAME:-whatsapp_monitor_prod}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - whatsapp-network
+
+  # Backend API Server
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: whatsapp-backend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-whatsapp_monitor_prod}
+      - DB_USERNAME=${DB_USERNAME:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-password}
+      # Chrome/Puppeteer settings for WhatsApp Web.js
+      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+      - CHROME_BIN=/usr/bin/chromium
+      - CHROME_PATH=/usr/bin/chromium
+    volumes:
+      # Persistent data
+      - ./backend/media:/app/media
+      - ./backend/rss:/app/rss
+      - ./backend/backups:/app/backups
+      - ./backend/.wwebjs_auth:/app/.wwebjs_auth
+      - ./backend/.wwebjs_cache:/app/.wwebjs_cache
+      - ./logs/backend:/app/logs
+      # Configuration (optional, for development)
+      # - ./backend/.env:/app/.env:ro
+    ports:
+      - "${BACKEND_PORT:-3001}:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - whatsapp-network
+    # Security options for Chrome
+    security_opt:
+      - seccomp:unconfined
+    # Shared memory for Chrome
+    shm_size: 2gb
+
+  # Selenium Link Downloader
+  selenium-downloader:
+    build:
+      context: ./selenium
+      dockerfile: Dockerfile
+    container_name: whatsapp-selenium
+    restart: unless-stopped
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-whatsapp_monitor_prod}
+      - DB_USER=${DB_USERNAME:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-password}
+      - PYTHONUNBUFFERED=1
+      - DISPLAY=:99
+      - CHROME_BIN=/usr/bin/google-chrome
+      - CHROME_PATH=/usr/bin/google-chrome
+    volumes:
+      # Shared media directory with backend
+      - ./backend/media:/app/backend/media
+      - ./downloads:/app/downloads
+      - ./logs/selenium:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    networks:
+      - whatsapp-network
+    # Security options for Chrome
+    security_opt:
+      - seccomp:unconfined
+    # Shared memory for Chrome
+    shm_size: 2gb
+    # Add capabilities for Chrome
+    cap_add:
+      - SYS_ADMIN
+
+  # Frontend React Application
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=http://localhost:3001
+        - VITE_SOCKET_URL=http://localhost:3001
+        - VITE_APP_TITLE=WhatsApp Monitor
+    container_name: whatsapp-frontend
+    restart: unless-stopped
+    environment:
+      - VITE_API_URL=http://localhost:3001
+      - VITE_SOCKET_URL=http://localhost:3001
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - whatsapp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Main Nginx Reverse Proxy (Optional, for production)
+  nginx:
+    image: nginx:alpine
+    container_name: whatsapp-nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/main-nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./backend/media:/var/www/media:ro
+      - ./backend/rss:/var/www/rss:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - whatsapp-network
+    profiles:
+      - production
+
+  # Redis (Optional, for caching and session management)
+  redis:
+    image: redis:7-alpine
+    container_name: whatsapp-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - whatsapp-network
+    profiles:
+      - with-redis
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  whatsapp-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
