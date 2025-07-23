@@ -40,10 +40,6 @@ services:
       - DB_USERNAME=${DB_USERNAME:-postgres}
       - DB_PASSWORD=${DB_PASSWORD:-password}
       # Chrome/Puppeteer settings for WhatsApp Web.js
-      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-      - CHROME_BIN=/usr/bin/chromium
-      - CHROME_PATH=/usr/bin/chromium
     volumes:
       # Persistent data
       - ./backend/media:/app/media

@@ -1,7 +1,7 @@
 # Use Node.js 18 with Chrome support for WhatsApp Web.js
 FROM node:18-bullseye
 
-# Install system dependencies for Chrome and WhatsApp Web.js
+# Install system dependencies for Puppeteer
 RUN apt-get update && apt-get install -y \
     wget \
     curl \
@@ -29,13 +29,9 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     libu2f-udev \
     libvulkan1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Google Chrome (more reliable than Chromium for WhatsApp Web.js)
-RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update \
-    && apt-get install -y google-chrome-stable \
+    libxss1 \
+    libgconf-2-4 \
+    libgbm1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -58,7 +54,7 @@ RUN mkdir -p \
 # Copy package files
 COPY package*.json ./
 
-# Install Node.js dependencies
+# Install Node.js dependencies (Puppeteer will download Chromium automatically)
 RUN npm ci --only=production && npm cache clean --force
 
 # Install Sequelize CLI globally for migrations
@@ -79,9 +75,6 @@ RUN if [ ! -f .env ]; then \
     chown nodeuser:nodeuser .env; \
     fi
 
-# Set Puppeteer to use installed Google Chrome
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome
 
 # Environment variables for Chrome
 ENV CHROME_BIN=/usr/bin/google-chrome \
@@ -89,18 +82,8 @@ ENV CHROME_BIN=/usr/bin/google-chrome \
     DISPLAY=:99 \
     PUPPETEER_ARGS="--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage"
 
-# Set proper permissions for Chrome to run
-RUN if [ -f /opt/google/chrome/chrome-sandbox ]; then \
-        chmod 4755 /opt/google/chrome/chrome-sandbox; \
-    elif [ -f /usr/lib/chromium/chrome-sandbox ]; then \
-        chmod 4755 /usr/lib/chromium/chrome-sandbox; \
-    elif [ -f /usr/bin/chromium-sandbox ]; then \
-        chmod 4755 /usr/bin/chromium-sandbox; \
-    else \
-        echo "⚠️ Chrome sandbox not found, Chrome will run with --no-sandbox"; \
-    fi
+# Remove Chrome-specific setup since we're using Puppeteer's auto-detection
 
-# Create startup script
 # Create startup script
 RUN echo '#!/bin/bash' > /app/start.sh \
     && echo 'set -e' >> /app/start.sh \
