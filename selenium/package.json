@@ -1,0 +1,33 @@
+{
+  "name": "selenium-video-downloader",
+  "version": "1.0.0",
+  "description": "Automated link downloader for Google Drive and WeTransfer using Selenium WebDriver",
+  "main": "sele_vd_downloader3.js",
+  "scripts": {
+    "start": "node sele_node.js",
+    "dev": "nodemon sele_node.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "selenium",
+    "webdriver",
+    "download",
+    "google-drive",
+    "wetransfer",
+    "automation"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "selenium-webdriver": "^4.18.1",
+    "pg": "^8.11.3",
+    "dotenv": "^16.4.5",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
