@@ -1,5 +1,8 @@
 # Complete Backend Overview: WhatsApp Monitor System
 ### How to setup and run:
+1. start postgres: `brew services start postgresql@14`
+2. connect to postgres CLI: `psql -U mrunal.a -d whatsapp_monitor_dev`
+
 1. git clone the repo
 2. run the bash script inside the scripts folder to setup env and setup postgres tables.
 3. go inside the backend folder and run `npm install`
@@ -10,10 +13,14 @@
 8. go to the selenium folder to run `python sele_vd_downloader3.py`
 
 RESET DATABASE:
-`npx sequelize-cli db:migrate:undo:all
-`
+`npx sequelize-cli db:migrate:undo:all`
 RECREATE THE TABLES:
 `npx sequelize-cli db:migrate`
+
+view all tables: `\d`
+view schema of a particular table: `\d <table name>`
+
+if you encounter _serialized error, then update the whatsapp_web.js module: `npm install whatsapp-web.js@latest`
 ## **High-Level Architecture**
 
 Your backend is a **real-time WhatsApp message monitoring system** that captures group messages, downloads media, generates RSS feeds, and provides a web API. Here's how everything connects:
